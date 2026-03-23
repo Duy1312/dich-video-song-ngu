@@ -6,8 +6,10 @@
     "doc": "docs"
   },
   "scripts": {
-    "build:chrome": "webpack --config webpack.config.js",
-    "build": "npm run build:chrome",
+    "build:chrome": "webpack --config-name chrome",
+    "build:firefox": "webpack --config-name firefox",
+    "build:edge": "webpack --config-name edge",
+    "build": "webpack",
     "test": "jest --coverage",
     "test:watch": "jest --watch"
   },

@@ -22,14 +22,23 @@ const commonConfig = {
   ],
 };
 
+const commonEntries = {
+  'background/service-worker': './src/background/service-worker.js',
+  'content/index': './src/content/index.js',
+  'popup/popup': './src/popup/popup.js',
+};
+
+const commonCopyPatterns = [
+  { from: 'src/popup/popup.html', to: 'popup/popup.html' },
+  { from: 'src/popup/popup.css', to: 'popup/popup.css' },
+  { from: 'icons', to: 'icons' },
+  { from: '_locales', to: '_locales' },
+];
+
 const chromeConfig = {
   ...commonConfig,
   name: 'chrome',
-  entry: {
-    'background/service-worker': './src/background/service-worker.js',
-    'content/index': './src/content/index.js',
-    'popup/popup': './src/popup/popup.js',
-  },
+  entry: { ...commonEntries },
   output: {
     path: path.resolve(__dirname, 'dist/chrome'),
     filename: '[name].js',
@@ -40,13 +49,50 @@ const chromeConfig = {
     new CopyPlugin({
       patterns: [
         { from: 'manifest.json', to: 'manifest.json' },
-        { from: 'src/popup/popup.html', to: 'popup/popup.html' },
-        { from: 'src/popup/popup.css', to: 'popup/popup.css' },
-        { from: 'icons', to: 'icons' },
-        { from: '_locales', to: '_locales' },
+        ...commonCopyPatterns,
       ],
     }),
   ],
 };
 
-module.exports = [chromeConfig];
+const firefoxConfig = {
+  ...commonConfig,
+  name: 'firefox',
+  entry: { ...commonEntries },
+  output: {
+    path: path.resolve(__dirname, 'dist/firefox'),
+    filename: '[name].js',
+    clean: true,
+  },
+  plugins: [
+    ...commonConfig.plugins,
+    new CopyPlugin({
+      patterns: [
+        { from: 'manifest.firefox.json', to: 'manifest.json' },
+        ...commonCopyPatterns,
+      ],
+    }),
+  ],
+};
+
+const edgeConfig = {
+  ...commonConfig,
+  name: 'edge',
+  entry: { ...commonEntries },
+  output: {
+    path: path.resolve(__dirname, 'dist/edge'),
+    filename: '[name].js',
+    clean: true,
+  },
+  plugins: [
+    ...commonConfig.plugins,
+    new CopyPlugin({
+      patterns: [
+        { from: 'manifest.json', to: 'manifest.json' },
+        ...commonCopyPatterns,
+      ],
+    }),
+  ],
+};
+
+module.exports = [chromeConfig, firefoxConfig, edgeConfig];
