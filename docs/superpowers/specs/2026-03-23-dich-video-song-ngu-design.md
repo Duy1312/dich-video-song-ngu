@@ -59,7 +59,7 @@ Browser extension dịch subtitle/audio trên mọi video trên mọi website, h
 ### Communication
 
 - Content Script ↔ Background: `chrome.runtime.sendMessage`
-- Popup ↔ Storage: `chrome.storage.sync` (đồng bộ across devices)
+- Popup ↔ Storage: `chrome.storage.sync` cho preferences, `chrome.storage.local` cho API keys (tránh sync keys lên cloud)
 - Content Script lắng nghe storage changes để cập nhật settings realtime
 
 ## Subtitle Extraction Pipeline
@@ -102,7 +102,7 @@ Video detected
 - Hoạt động trên mọi website dùng `<track>` chuẩn
 
 ### Step 2: Platform-specific Extraction
-- **YouTube:** Gọi `/api/timedtext` endpoint để lấy full subtitle list
+- **YouTube:** Gọi `/api/timedtext` endpoint để lấy full subtitle list. Fallback: DOM scraping YouTube rendered captions nếu endpoint thay đổi
 - **Vimeo:** Fetch text tracks từ player config JSON
 - **Các site khác:** Scan DOM tìm subtitle container phổ biến (class chứa "caption", "subtitle")
 - Dùng `MutationObserver` để detect subtitle text thay đổi trên DOM
@@ -260,6 +260,7 @@ dich_moi_nen_tang/
 
 - **Nhiều video trên 1 trang** — Mỗi video có instance riêng, click để active
 - **Video trong iframe** — Không hỗ trợ (chỉ HTML5 video trên main page)
+- **CORS-restricted video** — `createMediaElementSource()` trả về silent audio trên cross-origin video. STT fallback không hoạt động, thông báo user
 - **Live stream** — Speech recognition realtime, translation delay ~1-2s
 - **Ngôn ngữ nguồn = đích** — Detect và thông báo, không dịch
 - **Subtitle nhiều ngôn ngữ** — User chọn track nguồn trong control menu
