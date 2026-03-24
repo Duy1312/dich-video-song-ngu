@@ -4,6 +4,7 @@ import { SpeechRecognizer } from './speech-recognizer.js';
 import { OverlayUI } from './overlay-ui.js';
 import { SidePanelUI } from './side-panel-ui.js';
 import { ControlButton } from './control-button.js';
+import { extractCaptionTracks, fetchCaptionCues, selectBestTrack } from './youtube-captions.js';
 import { DEFAULT_SETTINGS, CUE_BUFFER_AHEAD } from '../utils/constants.js';
 import '../styles/overlay.css';
 import '../styles/side-panel.css';
@@ -162,19 +163,56 @@ class VideoTranslator {
     console.log(LOG_PREFIX, 'Trying platform-specific subtitles for:', url);
 
     if (this._extractor.isYouTube(url)) {
-      console.log(LOG_PREFIX, 'YouTube detected, observing DOM captions...');
-      // YouTube renders captions as DOM elements inside .ytp-caption-window-container
-      // The segments are .ytp-caption-segment
-      // User MUST have YouTube captions turned ON for this to work
-      this._extractor.observeDomSubtitles(
-        '.ytp-caption-segment',
-        (text) => this._onLiveCue(text)
-      );
+      console.log(LOG_PREFIX, 'YouTube detected, trying API captions first...');
+      this._tryYouTubeApiCaptions();
     } else {
       // Fallback: speech recognition
       console.log(LOG_PREFIX, 'No platform match, trying speech recognition...');
       this._startSpeechRecognition();
     }
+  }
+
+  async _tryYouTubeApiCaptions(retryCount = 0) {
+    // YouTube API approach: extract caption tracks from page data,
+    // fetch timed text directly — no DOM observation needed.
+    const tracks = extractCaptionTracks();
+
+    if (tracks.length === 0) {
+      if (retryCount < 5) {
+        // ytInitialPlayerResponse might not be available yet
+        console.log(LOG_PREFIX, `No caption tracks yet, retrying in 2s... (attempt ${retryCount + 1}/5)`);
+        setTimeout(() => this._tryYouTubeApiCaptions(retryCount + 1), 2000);
+        return;
+      }
+
+      console.warn(LOG_PREFIX, 'No YouTube caption tracks found after retries.');
+      console.log(LOG_PREFIX, 'Falling back to DOM observation (requires CC to be ON)...');
+      this._extractor.observeDomSubtitles(
+        '.ytp-caption-segment',
+        (text) => this._onLiveCue(text)
+      );
+      return;
+    }
+
+    // Select best track and fetch cues
+    const bestTrack = selectBestTrack(tracks);
+    if (!bestTrack) {
+      console.warn(LOG_PREFIX, 'Could not select a caption track');
+      return;
+    }
+
+    console.log(LOG_PREFIX, `Fetching captions: "${bestTrack.name}" (${bestTrack.languageCode})`);
+    const cues = await fetchCaptionCues(bestTrack.baseUrl);
+
+    if (cues.length === 0) {
+      console.warn(LOG_PREFIX, 'No cues parsed from caption track');
+      return;
+    }
+
+    // Load cues and start translating
+    this._cues = cues;
+    console.log(LOG_PREFIX, `✅ Loaded ${cues.length} cues from YouTube API! Starting translation...`);
+    this._translateBufferedCues(0);
   }
 
   _startSpeechRecognition() {
