@@ -90,17 +90,16 @@
     }
 
     try {
-      // Load the captions module
       if (typeof player.loadModule === 'function') {
         player.loadModule('captions');
-        console.log('[DịchVideo][PageScript] Loaded captions module');
       }
     } catch(e) {
       console.log('[DịchVideo][PageScript] loadModule failed:', e.message);
     }
 
+    var activated = false;
+
     try {
-      // Set the caption track
       if (typeof player.setOption === 'function') {
         player.setOption('captions', 'track', {
           languageCode: track.languageCode,
@@ -109,26 +108,24 @@
         });
         console.log('[DịchVideo][PageScript] Activated caption track:',
           track.name, track.languageCode);
-        return true;
+        activated = true;
       }
     } catch(e) {
       console.log('[DịchVideo][PageScript] setOption failed:', e.message);
     }
 
-    // Fallback: try clicking the CC button
-    try {
-      var ccBtn = document.querySelector('.ytp-subtitles-button');
-      if (ccBtn && ccBtn.getAttribute('aria-pressed') !== 'true') {
+    // Fallback: if CC button is not active, click it
+    var ccBtn = document.querySelector('.ytp-subtitles-button');
+    if (ccBtn) {
+      var pressed = ccBtn.getAttribute('aria-pressed');
+      if (pressed !== 'true') {
+        console.log('[DịchVideo][PageScript] CC not active, clicking button...');
         ccBtn.click();
-        console.log('[DịchVideo][PageScript] Clicked CC button');
-        return true;
-      } else if (ccBtn && ccBtn.getAttribute('aria-pressed') === 'true') {
-        console.log('[DịchVideo][PageScript] CC already active');
-        return true;
+        activated = true;
       }
-    } catch(e) {}
+    }
 
-    return false;
+    return activated;
   }
 
   function initCaptions() {

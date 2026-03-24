@@ -126,6 +126,22 @@ export class SubtitleExtractor {
 
     const isYouTube = segmentSelector === '.ytp-caption-segment';
 
+    // YouTube caption settings UI text patterns to filter out.
+    // These appear as .ytp-caption-segment inside the same container.
+    const YT_UI_PATTERNS = [
+      /^(Tiếng|English|Français|Deutsch|Español|日本語|한국어|中文|العربية)/,
+      /được tạo tự động/,
+      /auto-generated/i,
+      /Nhấp vào/,
+      /Click .* settings/i,
+      /để biết cài đặt/,
+      /caption settings/i,
+    ];
+
+    const isYouTubeUIText = (text) => {
+      return YT_UI_PATTERNS.some(pattern => pattern.test(text.trim()));
+    };
+
     this._domObserver = new MutationObserver(() => {
       // Debounce rapid mutations (YouTube updates char by char)
       if (this._debounceTimer) clearTimeout(this._debounceTimer);
@@ -136,17 +152,23 @@ export class SubtitleExtractor {
           // YouTube-specific: read ONLY from caption windows, not UI elements.
           // Structure: .ytp-caption-window-container
           //   → .ytp-caption-window-bottom (one per line of captions)
-          //     → .captions-text → .ytp-caption-segment (actual text spans)
-          //   → [settings popups, tooltips — IGNORE these]
+          //     → span.captions-text → span.ytp-caption-segment (actual text)
+          //     → [settings tooltip segments — FILTER these out]
           const captionWindows = observeTarget.querySelectorAll('.ytp-caption-window-bottom');
           const lines = [];
 
           captionWindows.forEach(win => {
             const segments = win.querySelectorAll(segmentSelector);
             if (segments.length > 0) {
-              let lineText = '';
-              segments.forEach(seg => { lineText += seg.textContent; });
-              lineText = lineText.trim();
+              const words = [];
+              segments.forEach(seg => {
+                const text = seg.textContent.trim();
+                // Filter out YouTube UI/settings text
+                if (text && !isYouTubeUIText(text)) {
+                  words.push(text);
+                }
+              });
+              const lineText = words.join(' ');
               if (lineText) lines.push(lineText);
             }
           });
