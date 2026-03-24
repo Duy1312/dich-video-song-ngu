@@ -12,6 +12,7 @@ const elements = {
   whisperKeySection: document.getElementById('whisperKeySection'),
   fontSize: document.getElementById('fontSize'),
   fontSizeValue: document.getElementById('fontSizeValue'),
+  subtitleBackground: document.getElementById('subtitleBackground'),
   saveBtn: document.getElementById('saveBtn'),
   status: document.getElementById('status'),
 };
@@ -46,6 +47,7 @@ chrome.storage.sync.get('settings', (data) => {
   elements.sttProvider.value = settings.sttProvider;
   elements.fontSize.value = settings.fontSize;
   elements.fontSizeValue.textContent = `${settings.fontSize}px`;
+  elements.subtitleBackground.checked = settings.subtitleBackground || false;
 
   elements.translationProvider.dispatchEvent(new Event('change'));
   elements.sttProvider.dispatchEvent(new Event('change'));
@@ -64,6 +66,7 @@ elements.saveBtn.addEventListener('click', () => {
     translationProvider: elements.translationProvider.value,
     sttProvider: elements.sttProvider.value,
     fontSize: parseInt(elements.fontSize.value),
+    subtitleBackground: elements.subtitleBackground.checked,
   };
 
   chrome.storage.sync.set({ settings }, () => {

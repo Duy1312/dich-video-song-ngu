@@ -33,11 +33,15 @@ describe('OverlayUI', () => {
   });
 
   test('hides subtitle', () => {
+    jest.useFakeTimers();
     overlay.init();
     overlay.showSubtitle('Hello', 'Xin chào');
     overlay.hide();
     const container = video.parentElement.querySelector('.dvsn-overlay');
+    expect(container.style.opacity).toBe('0');
+    jest.advanceTimersByTime(200);
     expect(container.style.display).toBe('none');
+    jest.useRealTimers();
   });
 
   test('updates subtitle in place', () => {

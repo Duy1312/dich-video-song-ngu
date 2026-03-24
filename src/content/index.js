@@ -70,6 +70,8 @@ class VideoTranslator {
 
     // Init UI components
     this._overlay.init();
+    this._overlay.setFontSize(this._settings.fontSize || 18);
+    this._overlay.setBackground(this._settings.subtitleBackground || false);
     this._sidePanel = new SidePanelUI({
       onCueClick: (time) => { this._video.currentTime = time; },
     });
@@ -116,8 +118,18 @@ class VideoTranslator {
     if (typeof chrome !== 'undefined' && chrome.storage) {
       chrome.storage.onChanged.addListener((changes) => {
         if (changes.settings) {
-          Object.assign(this._settings, changes.settings.newValue);
+          const newSettings = changes.settings.newValue;
+          Object.assign(this._settings, newSettings);
           console.log(LOG_PREFIX, 'Settings updated:', this._settings);
+
+          // Apply font size change immediately
+          if (newSettings.fontSize) {
+            this._overlay.setFontSize(newSettings.fontSize);
+          }
+          // Apply background toggle
+          if (newSettings.subtitleBackground !== undefined) {
+            this._overlay.setBackground(newSettings.subtitleBackground);
+          }
         }
       });
     }

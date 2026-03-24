@@ -19,7 +19,8 @@ export const DEFAULT_SETTINGS = {
   displayMode: 'both',
   translationProvider: 'google-free',
   sttProvider: 'web-speech',
-  fontSize: 16,
+  fontSize: 18,
+  subtitleBackground: false,
 };
 
 export const PROVIDER_NAMES = {
