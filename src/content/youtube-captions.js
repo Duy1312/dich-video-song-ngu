@@ -1,163 +1,125 @@
 /**
  * YouTube Caption Fetcher
  *
- * Fetches caption tracks directly from YouTube's player data
- * instead of relying on DOM observation.
- *
- * Content scripts run in an isolated world, so we can't access
- * window.ytInitialPlayerResponse directly. We use two approaches:
- * 1. Inject a script into the page context to read the global variable
- * 2. Parse script tags in the HTML source
+ * Fetches caption tracks from YouTube's player data using two approaches:
+ * 1. Communicate with youtube-page-script.js (runs in world: "MAIN")
+ *    via window.postMessage — bypasses YouTube CSP
+ * 2. Parse script tags in the HTML source as fallback
  */
 
 const LOG_PREFIX = '[DịchVideo][YT-Captions]';
+const MSG_TYPE = 'dvsn-yt-captions';
 
 /**
- * Extract caption track list from YouTube page data.
- * Uses multiple fallback strategies.
+ * Request caption tracks from the page-context script via postMessage.
+ * Returns a promise that resolves with tracks array.
+ * Times out after the specified ms.
  */
-export function extractCaptionTracks() {
-  // Method 1: Inject script into page context to access global vars
-  const tracksFromPageContext = extractViaPageInjection();
-  if (tracksFromPageContext && tracksFromPageContext.length > 0) {
-    console.log(LOG_PREFIX, 'Found tracks via page injection:', tracksFromPageContext.length);
-    return tracksFromPageContext;
-  }
+export function requestCaptionTracks(timeoutMs = 3000) {
+  return new Promise((resolve) => {
+    const requestId = 'req-' + Date.now();
+    let resolved = false;
 
-  // Method 2: Parse from script tags in page HTML
-  try {
-    const tracks = extractFromScriptTags();
-    if (tracks && tracks.length > 0) {
-      console.log(LOG_PREFIX, 'Found tracks from script tags:', tracks.length);
-      return tracks;
-    }
-  } catch (e) {
-    console.warn(LOG_PREFIX, 'Script tag parsing failed:', e.message);
-  }
-
-  console.warn(LOG_PREFIX, 'No caption tracks found from any method');
-  return [];
-}
-
-/**
- * Inject a script into the page context to read ytInitialPlayerResponse.
- * Communicates back via a custom DOM event.
- */
-function extractViaPageInjection() {
-  // Check if we already have data from a previous injection
-  const existing = document.getElementById('dvsn-yt-caption-data');
-  if (existing) {
-    try {
-      const data = JSON.parse(existing.textContent);
-      existing.remove();
-      return data;
-    } catch (e) {
-      existing.remove();
-    }
-  }
-
-  // Inject a script that reads the global and writes to a hidden element
-  const script = document.createElement('script');
-  script.textContent = `
-    (function() {
-      try {
-        var tracks = [];
-        var sources = [
-          window.ytInitialPlayerResponse,
-          window.ytplayer && window.ytplayer.config && window.ytplayer.config.args && window.ytplayer.config.args.raw_player_response
-        ];
-
-        // Also try movie_player API
-        var player = document.getElementById('movie_player');
-        if (player && typeof player.getPlayerResponse === 'function') {
-          sources.push(player.getPlayerResponse());
+    const handler = (event) => {
+      if (event.source !== window) return;
+      if (!event.data || event.data.type !== MSG_TYPE + '-response') return;
+      // Accept any response (auto, navigation, or our specific request)
+      if (event.data.tracks && event.data.tracks.length > 0) {
+        if (!resolved) {
+          resolved = true;
+          window.removeEventListener('message', handler);
+          console.log(LOG_PREFIX, 'Received tracks via postMessage:', event.data.tracks.length,
+            '(source:', event.data.requestId, ')');
+          resolve(event.data.tracks);
         }
-
-        for (var i = 0; i < sources.length; i++) {
-          var response = sources[i];
-          if (!response) continue;
-          var captionData = response.captions && response.captions.playerCaptionsTracklistRenderer;
-          if (!captionData || !captionData.captionTracks) continue;
-          tracks = captionData.captionTracks.map(function(t) {
-            return {
-              baseUrl: t.baseUrl,
-              languageCode: t.languageCode,
-              name: (t.name && (t.name.simpleText || (t.name.runs && t.name.runs[0] && t.name.runs[0].text))) || t.languageCode,
-              kind: t.kind || '',
-              isTranslatable: t.isTranslatable || false,
-              vssId: t.vssId || ''
-            };
-          });
-          if (tracks.length > 0) break;
-        }
-
-        var el = document.createElement('div');
-        el.id = 'dvsn-yt-caption-data';
-        el.style.display = 'none';
-        el.textContent = JSON.stringify(tracks);
-        document.documentElement.appendChild(el);
-      } catch(e) {
-        // silently fail
       }
-    })();
-  `;
-  document.documentElement.appendChild(script);
-  script.remove();
+    };
 
-  // Now read the data element
-  const dataEl = document.getElementById('dvsn-yt-caption-data');
-  if (dataEl) {
-    try {
-      const data = JSON.parse(dataEl.textContent);
-      dataEl.remove();
-      return data;
-    } catch (e) {
-      dataEl.remove();
-    }
-  }
+    window.addEventListener('message', handler);
 
-  return null;
+    // Send request to page context script
+    window.postMessage({ type: MSG_TYPE + '-request', requestId }, '*');
+
+    // Timeout fallback
+    setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        window.removeEventListener('message', handler);
+        console.log(LOG_PREFIX, 'postMessage timeout after', timeoutMs, 'ms');
+        resolve([]);
+      }
+    }, timeoutMs);
+  });
 }
 
-function extractFromScriptTags() {
+/**
+ * Extract caption tracks by parsing script tags in page HTML.
+ * This works from the content script's isolated world.
+ */
+export function extractFromScriptTags() {
   const scripts = document.querySelectorAll('script');
   for (const script of scripts) {
     const text = script.textContent;
-    if (!text) continue;
+    if (!text || text.length < 100) continue;
 
-    // Look for ytInitialPlayerResponse in script content
-    const match = text.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
+    // Look for "captionTracks" in the script content (fast pre-check)
+    if (!text.includes('captionTracks')) continue;
+
+    // Try to extract ytInitialPlayerResponse
+    const match = text.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});\s*(?:var|let|const|if|<\/script)/s);
     if (match) {
       try {
         const data = JSON.parse(match[1]);
         const tracks = getTracksFromPlayerResponse(data);
-        if (tracks && tracks.length > 0) return tracks;
+        if (tracks && tracks.length > 0) {
+          console.log(LOG_PREFIX, 'Found tracks from script tags:', tracks.length);
+          return tracks;
+        }
       } catch (e) {
-        // JSON parse failed, try next
-      }
-    }
-
-    // Also try var ytInitialPlayerResponse = {...}
-    const match2 = text.match(/var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
-    if (match2) {
-      try {
-        const data = JSON.parse(match2[1]);
-        const tracks = getTracksFromPlayerResponse(data);
-        if (tracks && tracks.length > 0) return tracks;
-      } catch (e) {
-        // JSON parse failed
+        // JSON parse failed, continue searching
       }
     }
   }
+  return [];
+}
+
+function getTracksFromPlayerResponse(response) {
+  const captionData = response?.captions?.playerCaptionsTracklistRenderer;
+  if (!captionData || !captionData.captionTracks) return [];
+
+  return captionData.captionTracks.map(track => ({
+    baseUrl: track.baseUrl,
+    languageCode: track.languageCode,
+    name: track.name?.simpleText || track.name?.runs?.[0]?.text || track.languageCode,
+    kind: track.kind || '',
+    isTranslatable: track.isTranslatable || false,
+    vssId: track.vssId || '',
+  }));
+}
+
+/**
+ * Combined extraction: try postMessage first, then script tags.
+ */
+export async function extractCaptionTracks() {
+  // Method 1: Request from page-context script via postMessage
+  const tracks = await requestCaptionTracks(3000);
+  if (tracks.length > 0) return tracks;
+
+  // Method 2: Parse script tags (fallback)
+  try {
+    const scriptTracks = extractFromScriptTags();
+    if (scriptTracks.length > 0) return scriptTracks;
+  } catch (e) {
+    console.warn(LOG_PREFIX, 'Script tag parsing failed:', e.message);
+  }
+
+  console.warn(LOG_PREFIX, 'No caption tracks found');
   return [];
 }
 
 /**
  * Fetch subtitle cues from a caption track URL.
  * YouTube returns XML (timedtext) or JSON (json3) format.
- * @param {string} baseUrl - The caption track URL from YouTube
- * @param {string} format - 'json3' or 'srv3' (default: json3)
- * @returns {Array<{startTime: number, endTime: number, text: string}>}
  */
 export async function fetchCaptionCues(baseUrl, format = 'json3') {
   try {
@@ -195,7 +157,6 @@ async function parseJson3(response) {
   if (!data.events) return cues;
 
   for (const event of data.events) {
-    // Skip events without segments (e.g., format events)
     if (!event.segs) continue;
 
     const text = event.segs
@@ -254,26 +215,23 @@ async function parseSrv3Xml(response) {
 
 /**
  * Select the best caption track to use.
- * Priority: original language > auto-generated > first available
+ * Priority: manual > auto-generated > first available
  */
 export function selectBestTrack(tracks) {
   if (!tracks || tracks.length === 0) return null;
 
-  // Prefer non-ASR (manual) tracks
   const manual = tracks.filter(t => t.kind !== 'asr');
   if (manual.length > 0) {
     console.log(LOG_PREFIX, 'Using manual caption track:', manual[0].name, manual[0].languageCode);
     return manual[0];
   }
 
-  // Fall back to ASR (auto-generated)
   const asr = tracks.filter(t => t.kind === 'asr');
   if (asr.length > 0) {
     console.log(LOG_PREFIX, 'Using auto-generated caption track:', asr[0].name, asr[0].languageCode);
     return asr[0];
   }
 
-  // Use first available
   console.log(LOG_PREFIX, 'Using first available track:', tracks[0].name, tracks[0].languageCode);
   return tracks[0];
 }

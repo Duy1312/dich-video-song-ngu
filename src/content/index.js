@@ -173,15 +173,14 @@ class VideoTranslator {
   }
 
   async _tryYouTubeApiCaptions(retryCount = 0) {
-    // YouTube API approach: extract caption tracks from page data,
-    // fetch timed text directly — no DOM observation needed.
-    const tracks = extractCaptionTracks();
+    // YouTube API approach: request caption tracks from the page-context script
+    // (youtube-page-script.js running in world: "MAIN" can access YouTube globals)
+    const tracks = await extractCaptionTracks();
 
     if (tracks.length === 0) {
-      if (retryCount < 5) {
-        // ytInitialPlayerResponse might not be available yet
-        console.log(LOG_PREFIX, `No caption tracks yet, retrying in 2s... (attempt ${retryCount + 1}/5)`);
-        setTimeout(() => this._tryYouTubeApiCaptions(retryCount + 1), 2000);
+      if (retryCount < 3) {
+        console.log(LOG_PREFIX, `No caption tracks yet, retrying in 3s... (attempt ${retryCount + 1}/3)`);
+        setTimeout(() => this._tryYouTubeApiCaptions(retryCount + 1), 3000);
         return;
       }
 

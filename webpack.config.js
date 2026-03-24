@@ -25,6 +25,7 @@ const commonConfig = {
 const commonEntries = {
   'background/service-worker': './src/background/service-worker.js',
   'content/index': './src/content/index.js',
+  'content/youtube-page-script': './src/content/youtube-page-script.js',
   'popup/popup': './src/popup/popup.js',
 };
 

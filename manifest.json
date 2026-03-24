@@ -15,6 +15,12 @@
       "js": ["content/index.js"],
       "css": ["content/index.css"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://*.youtube.com/*"],
+      "js": ["content/youtube-page-script.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
     }
   ],
   "action": {
