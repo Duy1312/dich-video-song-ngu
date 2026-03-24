@@ -4,7 +4,7 @@ import { SpeechRecognizer } from './speech-recognizer.js';
 import { OverlayUI } from './overlay-ui.js';
 import { SidePanelUI } from './side-panel-ui.js';
 import { ControlButton } from './control-button.js';
-import { requestCaptionCues, listenForAutoCues, selectBestTrack } from './youtube-captions.js';
+import { requestActivateCaptions } from './youtube-captions.js';
 import { DEFAULT_SETTINGS, CUE_BUFFER_AHEAD } from '../utils/constants.js';
 import '../styles/overlay.css';
 import '../styles/side-panel.css';
@@ -184,43 +184,29 @@ class VideoTranslator {
     }
   }
 
-  async _tryYouTubeApiCaptions(retryCount = 0) {
-    // Ask the page-context script (world: MAIN) to extract tracks AND fetch cues.
-    // This runs in YouTube's page context with full cookie/session access.
-    const result = await requestCaptionCues(8000);
+  async _tryYouTubeApiCaptions() {
+    // Strategy: ask the page script (world: MAIN) to programmatically
+    // activate captions via YouTube's player API. Then we observe the DOM
+    // for caption segments. This is the most reliable approach because
+    // YouTube's timedtext API returns empty responses from extensions.
 
-    if (result.cues && result.cues.length > 0) {
-      this._cues = result.cues;
-      const trackInfo = result.track
-        ? `"${result.track.name}" (${result.track.languageCode})`
-        : 'unknown';
-      console.log(LOG_PREFIX, `✅ Loaded ${result.cues.length} cues from YouTube API (${trackInfo})! Starting translation...`);
-      this._translateBufferedCues(0);
-      return;
+    console.log(LOG_PREFIX, 'Requesting caption activation via YouTube player API...');
+    const result = await requestActivateCaptions(12000);
+
+    if (result && result.activated) {
+      const track = result.selectedTrack;
+      console.log(LOG_PREFIX, `✅ Captions activated: "${track.name}" (${track.languageCode})`);
+      console.log(LOG_PREFIX, 'Starting DOM observation for caption segments...');
+    } else {
+      console.warn(LOG_PREFIX, 'Could not activate captions via player API, trying CC button fallback...');
     }
 
-    // If first attempt failed, retry
-    if (retryCount < 2) {
-      console.log(LOG_PREFIX, `No cues received, retrying in 3s... (attempt ${retryCount + 1}/2)`);
-      setTimeout(() => this._tryYouTubeApiCaptions(retryCount + 1), 3000);
-      return;
-    }
-
-    // Fallback to DOM observation
-    console.warn(LOG_PREFIX, 'YouTube API captions not available. Falling back to DOM observation (requires CC ON)...');
+    // In all cases, observe DOM for caption text.
+    // Even if activation "failed", captions might already be on, or user may turn them on.
     this._extractor.observeDomSubtitles(
       '.ytp-caption-segment',
       (text) => this._onLiveCue(text)
     );
-
-    // Also listen for auto-pushed cues (page script sends them on navigation)
-    this._autoCuesCleanup = listenForAutoCues(({ cues, track }) => {
-      if (cues.length > 0) {
-        console.log(LOG_PREFIX, `✅ Auto-received ${cues.length} cues! Switching from DOM to API cues.`);
-        this._cues = cues;
-        this._translateBufferedCues(0);
-      }
-    });
   }
 
   _startSpeechRecognition() {
@@ -349,9 +335,6 @@ class VideoTranslator {
     console.log(LOG_PREFIX, 'Destroying VideoTranslator');
     if (this._timeUpdateHandler) {
       this._video.removeEventListener('timeupdate', this._timeUpdateHandler);
-    }
-    if (this._autoCuesCleanup) {
-      this._autoCuesCleanup();
     }
     this._extractor.destroy();
     this._overlay.destroy();

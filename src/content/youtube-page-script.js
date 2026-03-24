@@ -1,19 +1,23 @@
 /**
  * YouTube Page Context Script (runs in world: "MAIN")
  *
- * This script runs in YouTube's page JS context, NOT the extension's
- * isolated world. It can access window.ytInitialPlayerResponse and
- * other YouTube globals that content scripts cannot.
+ * This script runs in YouTube's page JS context to:
+ * 1. Extract available caption tracks from player data
+ * 2. Programmatically activate captions via the YouTube player API
+ *    (so captions appear in DOM even if user hasn't turned on CC)
+ * 3. Communicate with the content script via window.postMessage
  *
- * It also fetches caption data directly — this is critical because
- * fetching from the content script's isolated world may fail due to
- * missing cookies/session tokens.
- *
- * Communicates with the content script via window.postMessage.
+ * We DON'T fetch from timedtext API (returns empty body).
+ * Instead we let YouTube's player load captions, then the content
+ * script reads them from the DOM.
  */
 
 (function() {
   var MSG_TYPE = 'dvsn-yt-captions';
+
+  function getPlayer() {
+    return document.getElementById('movie_player');
+  }
 
   function extractCaptionTracks() {
     var tracks = [];
@@ -21,7 +25,6 @@
       window.ytInitialPlayerResponse,
     ];
 
-    // Try ytplayer.config
     try {
       if (window.ytplayer && window.ytplayer.config &&
           window.ytplayer.config.args &&
@@ -30,9 +33,8 @@
       }
     } catch(e) {}
 
-    // Try movie_player API
     try {
-      var player = document.getElementById('movie_player');
+      var player = getPlayer();
       if (player && typeof player.getPlayerResponse === 'function') {
         sources.push(player.getPlayerResponse());
       }
@@ -69,7 +71,6 @@
 
   function selectBestTrack(tracks) {
     if (!tracks || tracks.length === 0) return null;
-    // Prefer manual tracks over auto-generated
     var manual = tracks.filter(function(t) { return t.kind !== 'asr'; });
     if (manual.length > 0) return manual[0];
     var asr = tracks.filter(function(t) { return t.kind === 'asr'; });
@@ -77,111 +78,85 @@
     return tracks[0];
   }
 
-  function parseJson3(data) {
-    var cues = [];
-    if (!data || !data.events) return cues;
+  /**
+   * Programmatically activate captions in the YouTube player.
+   * This causes YouTube to load caption data and render it in the DOM.
+   */
+  function activateCaptions(track) {
+    var player = getPlayer();
+    if (!player) {
+      console.log('[DịchVideo][PageScript] No movie_player found');
+      return false;
+    }
 
-    for (var i = 0; i < data.events.length; i++) {
-      var event = data.events[i];
-      if (!event.segs) continue;
-
-      var text = '';
-      for (var j = 0; j < event.segs.length; j++) {
-        text += event.segs[j].utf8 || '';
+    try {
+      // Load the captions module
+      if (typeof player.loadModule === 'function') {
+        player.loadModule('captions');
+        console.log('[DịchVideo][PageScript] Loaded captions module');
       }
-      text = text.replace(/\n/g, ' ').trim();
-      if (!text) continue;
-
-      var startMs = event.tStartMs || 0;
-      var durationMs = event.dDurationMs || 3000;
-
-      cues.push({
-        startTime: startMs / 1000,
-        endTime: (startMs + durationMs) / 1000,
-        text: text
-      });
+    } catch(e) {
+      console.log('[DịchVideo][PageScript] loadModule failed:', e.message);
     }
-    return cues;
+
+    try {
+      // Set the caption track
+      if (typeof player.setOption === 'function') {
+        player.setOption('captions', 'track', {
+          languageCode: track.languageCode,
+          kind: track.kind || undefined,
+          name: track.name || undefined,
+        });
+        console.log('[DịchVideo][PageScript] Activated caption track:',
+          track.name, track.languageCode);
+        return true;
+      }
+    } catch(e) {
+      console.log('[DịchVideo][PageScript] setOption failed:', e.message);
+    }
+
+    // Fallback: try clicking the CC button
+    try {
+      var ccBtn = document.querySelector('.ytp-subtitles-button');
+      if (ccBtn && ccBtn.getAttribute('aria-pressed') !== 'true') {
+        ccBtn.click();
+        console.log('[DịchVideo][PageScript] Clicked CC button');
+        return true;
+      } else if (ccBtn && ccBtn.getAttribute('aria-pressed') === 'true') {
+        console.log('[DịchVideo][PageScript] CC already active');
+        return true;
+      }
+    } catch(e) {}
+
+    return false;
   }
 
-  function parseSrv3Xml(text) {
-    var cues = [];
-    var parser = new DOMParser();
-    var doc = parser.parseFromString(text, 'text/xml');
-    var elements = doc.querySelectorAll('text');
-
-    for (var i = 0; i < elements.length; i++) {
-      var el = elements[i];
-      var start = parseFloat(el.getAttribute('start') || '0');
-      var dur = parseFloat(el.getAttribute('dur') || '3');
-      var content = el.textContent
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&#39;/g, "'")
-        .replace(/&quot;/g, '"')
-        .replace(/<[^>]*>/g, '')
-        .trim();
-
-      if (!content) continue;
-
-      cues.push({
-        startTime: start,
-        endTime: start + dur,
-        text: content
-      });
+  function initCaptions() {
+    var tracks = extractCaptionTracks();
+    if (tracks.length === 0) {
+      console.log('[DịchVideo][PageScript] No caption tracks available');
+      return;
     }
-    return cues;
-  }
 
-  function fetchAndParseCaptions(track) {
-    var url = track.baseUrl;
-    console.log('[DịchVideo][PageScript] Fetching captions:', track.name, track.languageCode);
-    console.log('[DịchVideo][PageScript] URL:', url.substring(0, 120) + '...');
+    var bestTrack = selectBestTrack(tracks);
+    if (!bestTrack) return;
 
-    return fetch(url, { credentials: 'include' })
-      .then(function(response) {
-        console.log('[DịchVideo][PageScript] Response status:', response.status, 'ok:', response.ok);
-        if (!response.ok) throw new Error('HTTP ' + response.status);
-        return response.text();
-      })
-      .then(function(text) {
-        console.log('[DịchVideo][PageScript] Response length:', text.length, 'first 100:', text.substring(0, 100));
+    console.log('[DịchVideo][PageScript] Found', tracks.length, 'track(s). Best:',
+      bestTrack.name, bestTrack.languageCode);
 
-        if (!text || text.length < 10) {
-          throw new Error('Empty response');
-        }
+    var activated = activateCaptions(bestTrack);
 
-        // Try JSON first
-        if (text.trimStart().charAt(0) === '{') {
-          try {
-            var data = JSON.parse(text);
-            var cues = parseJson3(data);
-            if (cues.length > 0) {
-              console.log('[DịchVideo][PageScript] Parsed', cues.length, 'cues (json3)');
-              return cues;
-            }
-          } catch(e) {
-            console.log('[DịchVideo][PageScript] JSON parse failed, trying XML');
-          }
-        }
-
-        // Try XML
-        if (text.indexOf('<text') !== -1 || text.indexOf('<?xml') !== -1) {
-          var cues = parseSrv3Xml(text);
-          if (cues.length > 0) {
-            console.log('[DịchVideo][PageScript] Parsed', cues.length, 'cues (XML)');
-            return cues;
-          }
-        }
-
-        console.warn('[DịchVideo][PageScript] Could not parse response');
-        return [];
-      })
-      .catch(function(error) {
-        console.error('[DịchVideo][PageScript] Fetch failed:', error.message);
-        return [];
-      });
+    // Notify content script
+    window.postMessage({
+      type: MSG_TYPE + '-activated',
+      tracks: tracks,
+      selectedTrack: {
+        name: bestTrack.name,
+        languageCode: bestTrack.languageCode,
+        kind: bestTrack.kind
+      },
+      activated: activated
+    }, '*');
   }
 
   // Listen for requests from content script
@@ -189,90 +164,37 @@
     if (event.source !== window) return;
     if (!event.data) return;
 
-    // Track list request
-    if (event.data.type === MSG_TYPE + '-request') {
-      var tracks = extractCaptionTracks();
-      window.postMessage({
-        type: MSG_TYPE + '-response',
-        tracks: tracks,
-        requestId: event.data.requestId
-      }, '*');
-    }
-
-    // Fetch cues request (content script asks page script to fetch)
-    if (event.data.type === MSG_TYPE + '-fetch-cues') {
-      var tracks = extractCaptionTracks();
-      var bestTrack = selectBestTrack(tracks);
-
-      if (!bestTrack) {
-        window.postMessage({
-          type: MSG_TYPE + '-cues-response',
-          cues: [],
-          track: null,
-          error: 'No caption tracks found',
-          requestId: event.data.requestId
-        }, '*');
-        return;
-      }
-
-      fetchAndParseCaptions(bestTrack).then(function(cues) {
-        window.postMessage({
-          type: MSG_TYPE + '-cues-response',
-          cues: cues,
-          track: {
-            name: bestTrack.name,
-            languageCode: bestTrack.languageCode,
-            kind: bestTrack.kind
-          },
-          requestId: event.data.requestId
-        }, '*');
-      });
+    if (event.data.type === MSG_TYPE + '-activate') {
+      initCaptions();
     }
   });
 
-  // Auto-fetch on page load
-  setTimeout(function() {
-    var tracks = extractCaptionTracks();
-    if (tracks.length === 0) return;
+  // Auto-init on page load with delay for player readiness
+  function waitForPlayerAndInit() {
+    var attempts = 0;
+    var maxAttempts = 20; // 10 seconds max
+    var interval = setInterval(function() {
+      attempts++;
+      var player = getPlayer();
+      if (player && typeof player.loadModule === 'function') {
+        clearInterval(interval);
+        console.log('[DịchVideo][PageScript] Player ready after', attempts * 500, 'ms');
+        initCaptions();
+      } else if (attempts >= maxAttempts) {
+        clearInterval(interval);
+        console.log('[DịchVideo][PageScript] Player not found after 10s, trying anyway');
+        initCaptions();
+      }
+    }, 500);
+  }
 
-    var bestTrack = selectBestTrack(tracks);
-    if (!bestTrack) return;
+  waitForPlayerAndInit();
 
-    fetchAndParseCaptions(bestTrack).then(function(cues) {
-      window.postMessage({
-        type: MSG_TYPE + '-cues-response',
-        cues: cues,
-        track: {
-          name: bestTrack.name,
-          languageCode: bestTrack.languageCode,
-          kind: bestTrack.kind
-        },
-        requestId: 'auto'
-      }, '*');
-    });
-  }, 1500);
-
-  // Re-fetch on YouTube SPA navigation
+  // Re-init on YouTube SPA navigation
   window.addEventListener('yt-navigate-finish', function() {
     setTimeout(function() {
-      var tracks = extractCaptionTracks();
-      if (tracks.length === 0) return;
-
-      var bestTrack = selectBestTrack(tracks);
-      if (!bestTrack) return;
-
-      fetchAndParseCaptions(bestTrack).then(function(cues) {
-        window.postMessage({
-          type: MSG_TYPE + '-cues-response',
-          cues: cues,
-          track: {
-            name: bestTrack.name,
-            languageCode: bestTrack.languageCode,
-            kind: bestTrack.kind
-          },
-          requestId: 'navigation'
-        }, '*');
-      });
+      console.log('[DịchVideo][PageScript] SPA navigation, re-initializing...');
+      initCaptions();
     }, 2000);
   });
 })();

@@ -1,9 +1,16 @@
-/* === Hide native captions === */
-.ytp-caption-window-container,
+/* === Hide native captions visually but keep them in DOM === */
+/* We use opacity:0 + pointer-events:none instead of display:none
+   because our MutationObserver needs the caption elements to exist
+   and update their text content for us to read. */
+.ytp-caption-window-container {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
 .ytp-caption-window-bottom,
 .caption-window {
-  display: none !important;
   opacity: 0 !important;
+  pointer-events: none !important;
 }
 
 /* === Bilingual subtitle overlay === */
