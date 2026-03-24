@@ -124,19 +124,44 @@ export class SubtitleExtractor {
       this._domObserver.disconnect();
     }
 
+    const isYouTube = segmentSelector === '.ytp-caption-segment';
+
     this._domObserver = new MutationObserver(() => {
       // Debounce rapid mutations (YouTube updates char by char)
       if (this._debounceTimer) clearTimeout(this._debounceTimer);
       this._debounceTimer = setTimeout(() => {
-        // Always search for segments from the observe target
-        const segments = observeTarget.querySelectorAll(segmentSelector);
         let fullText = '';
 
-        if (segments && segments.length > 0) {
-          segments.forEach(seg => { fullText += seg.textContent; });
+        if (isYouTube) {
+          // YouTube-specific: read ONLY from caption windows, not UI elements.
+          // Structure: .ytp-caption-window-container
+          //   → .ytp-caption-window-bottom (one per line of captions)
+          //     → .captions-text → .ytp-caption-segment (actual text spans)
+          //   → [settings popups, tooltips — IGNORE these]
+          const captionWindows = observeTarget.querySelectorAll('.ytp-caption-window-bottom');
+          const lines = [];
+
+          captionWindows.forEach(win => {
+            const segments = win.querySelectorAll(segmentSelector);
+            if (segments.length > 0) {
+              let lineText = '';
+              segments.forEach(seg => { lineText += seg.textContent; });
+              lineText = lineText.trim();
+              if (lineText) lines.push(lineText);
+            }
+          });
+
+          fullText = lines.join(' ');
         } else {
-          // Fallback: use the entire container text
-          fullText = observeTarget.textContent;
+          // Generic: search for segments from the observe target
+          const segments = observeTarget.querySelectorAll(segmentSelector);
+          if (segments && segments.length > 0) {
+            const parts = [];
+            segments.forEach(seg => { parts.push(seg.textContent.trim()); });
+            fullText = parts.filter(Boolean).join(' ');
+          } else {
+            fullText = observeTarget.textContent;
+          }
         }
 
         fullText = fullText.trim();
