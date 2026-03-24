@@ -119,39 +119,56 @@ export async function extractCaptionTracks() {
 
 /**
  * Fetch subtitle cues from a caption track URL.
- * YouTube returns XML (timedtext) or JSON (json3) format.
+ * IMPORTANT: YouTube's baseUrl contains a signature that validates all params.
+ * Do NOT modify the URL (e.g., changing fmt) — it will invalidate the signature
+ * and return empty/error responses. Use the URL as-is.
  */
-export async function fetchCaptionCues(baseUrl, format = 'json3') {
+export async function fetchCaptionCues(baseUrl) {
   try {
-    const url = new URL(baseUrl);
-    url.searchParams.set('fmt', format);
+    console.log(LOG_PREFIX, 'Fetching captions from:', baseUrl.substring(0, 120) + '...');
 
-    console.log(LOG_PREFIX, 'Fetching captions from:', url.toString().substring(0, 100) + '...');
-
-    const response = await fetch(url.toString());
+    const response = await fetch(baseUrl);
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
 
-    if (format === 'json3') {
-      return await parseJson3(response);
-    } else {
-      return await parseSrv3Xml(response);
+    const text = await response.text();
+    if (!text || text.length < 10) {
+      throw new Error('Empty response body');
     }
+
+    // Detect format from URL or content
+    const url = new URL(baseUrl);
+    const fmt = url.searchParams.get('fmt') || '';
+
+    // Try JSON parse first (json3 format)
+    if (fmt === 'json3' || text.trimStart().startsWith('{')) {
+      try {
+        const data = JSON.parse(text);
+        const cues = parseJson3Data(data);
+        if (cues.length > 0) return cues;
+      } catch (e) {
+        console.log(LOG_PREFIX, 'Not valid JSON, trying XML...');
+      }
+    }
+
+    // Try XML parse (srv3 or default format)
+    if (text.includes('<text') || text.includes('<?xml')) {
+      const cues = parseSrv3XmlText(text);
+      if (cues.length > 0) return cues;
+    }
+
+    // If default format didn't work, the response might be in a different format
+    // Log what we got for debugging
+    console.warn(LOG_PREFIX, 'Unrecognized response format. First 200 chars:', text.substring(0, 200));
+    return [];
   } catch (error) {
     console.error(LOG_PREFIX, 'Failed to fetch captions:', error.message);
-
-    // Retry with srv3 XML format if json3 failed
-    if (format === 'json3') {
-      console.log(LOG_PREFIX, 'Retrying with srv3 XML format...');
-      return fetchCaptionCues(baseUrl, 'srv3');
-    }
     return [];
   }
 }
 
-async function parseJson3(response) {
-  const data = await response.json();
+function parseJson3Data(data) {
   const cues = [];
 
   if (!data.events) return cues;
@@ -181,8 +198,7 @@ async function parseJson3(response) {
   return cues;
 }
 
-async function parseSrv3Xml(response) {
-  const text = await response.text();
+function parseSrv3XmlText(text) {
   const parser = new DOMParser();
   const doc = parser.parseFromString(text, 'text/xml');
   const cues = [];
