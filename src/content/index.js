@@ -4,7 +4,7 @@ import { SpeechRecognizer } from './speech-recognizer.js';
 import { OverlayUI } from './overlay-ui.js';
 import { SidePanelUI } from './side-panel-ui.js';
 import { ControlButton } from './control-button.js';
-import { extractCaptionTracks, fetchCaptionCues, selectBestTrack } from './youtube-captions.js';
+import { requestCaptionCues, listenForAutoCues, selectBestTrack } from './youtube-captions.js';
 import { DEFAULT_SETTINGS, CUE_BUFFER_AHEAD } from '../utils/constants.js';
 import '../styles/overlay.css';
 import '../styles/side-panel.css';
@@ -185,45 +185,42 @@ class VideoTranslator {
   }
 
   async _tryYouTubeApiCaptions(retryCount = 0) {
-    // YouTube API approach: request caption tracks from the page-context script
-    // (youtube-page-script.js running in world: "MAIN" can access YouTube globals)
-    const tracks = await extractCaptionTracks();
+    // Ask the page-context script (world: MAIN) to extract tracks AND fetch cues.
+    // This runs in YouTube's page context with full cookie/session access.
+    const result = await requestCaptionCues(8000);
 
-    if (tracks.length === 0) {
-      if (retryCount < 3) {
-        console.log(LOG_PREFIX, `No caption tracks yet, retrying in 3s... (attempt ${retryCount + 1}/3)`);
-        setTimeout(() => this._tryYouTubeApiCaptions(retryCount + 1), 3000);
-        return;
+    if (result.cues && result.cues.length > 0) {
+      this._cues = result.cues;
+      const trackInfo = result.track
+        ? `"${result.track.name}" (${result.track.languageCode})`
+        : 'unknown';
+      console.log(LOG_PREFIX, `✅ Loaded ${result.cues.length} cues from YouTube API (${trackInfo})! Starting translation...`);
+      this._translateBufferedCues(0);
+      return;
+    }
+
+    // If first attempt failed, retry
+    if (retryCount < 2) {
+      console.log(LOG_PREFIX, `No cues received, retrying in 3s... (attempt ${retryCount + 1}/2)`);
+      setTimeout(() => this._tryYouTubeApiCaptions(retryCount + 1), 3000);
+      return;
+    }
+
+    // Fallback to DOM observation
+    console.warn(LOG_PREFIX, 'YouTube API captions not available. Falling back to DOM observation (requires CC ON)...');
+    this._extractor.observeDomSubtitles(
+      '.ytp-caption-segment',
+      (text) => this._onLiveCue(text)
+    );
+
+    // Also listen for auto-pushed cues (page script sends them on navigation)
+    this._autoCuesCleanup = listenForAutoCues(({ cues, track }) => {
+      if (cues.length > 0) {
+        console.log(LOG_PREFIX, `✅ Auto-received ${cues.length} cues! Switching from DOM to API cues.`);
+        this._cues = cues;
+        this._translateBufferedCues(0);
       }
-
-      console.warn(LOG_PREFIX, 'No YouTube caption tracks found after retries.');
-      console.log(LOG_PREFIX, 'Falling back to DOM observation (requires CC to be ON)...');
-      this._extractor.observeDomSubtitles(
-        '.ytp-caption-segment',
-        (text) => this._onLiveCue(text)
-      );
-      return;
-    }
-
-    // Select best track and fetch cues
-    const bestTrack = selectBestTrack(tracks);
-    if (!bestTrack) {
-      console.warn(LOG_PREFIX, 'Could not select a caption track');
-      return;
-    }
-
-    console.log(LOG_PREFIX, `Fetching captions: "${bestTrack.name}" (${bestTrack.languageCode})`);
-    const cues = await fetchCaptionCues(bestTrack.baseUrl);
-
-    if (cues.length === 0) {
-      console.warn(LOG_PREFIX, 'No cues parsed from caption track');
-      return;
-    }
-
-    // Load cues and start translating
-    this._cues = cues;
-    console.log(LOG_PREFIX, `✅ Loaded ${cues.length} cues from YouTube API! Starting translation...`);
-    this._translateBufferedCues(0);
+    });
   }
 
   _startSpeechRecognition() {
@@ -352,6 +349,9 @@ class VideoTranslator {
     console.log(LOG_PREFIX, 'Destroying VideoTranslator');
     if (this._timeUpdateHandler) {
       this._video.removeEventListener('timeupdate', this._timeUpdateHandler);
+    }
+    if (this._autoCuesCleanup) {
+      this._autoCuesCleanup();
     }
     this._extractor.destroy();
     this._overlay.destroy();

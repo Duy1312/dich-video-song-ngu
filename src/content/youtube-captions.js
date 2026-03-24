@@ -1,232 +1,88 @@
 /**
  * YouTube Caption Fetcher
  *
- * Fetches caption tracks from YouTube's player data using two approaches:
- * 1. Communicate with youtube-page-script.js (runs in world: "MAIN")
- *    via window.postMessage — bypasses YouTube CSP
- * 2. Parse script tags in the HTML source as fallback
+ * Primary approach: ask youtube-page-script.js (world: "MAIN") to both
+ * extract caption tracks AND fetch caption data. The page script runs in
+ * YouTube's JS context with full access to cookies/session, which is
+ * necessary for YouTube's timedtext API to return data.
+ *
+ * Fallback: parse script tags, then DOM observation.
  */
 
 const LOG_PREFIX = '[DịchVideo][YT-Captions]';
 const MSG_TYPE = 'dvsn-yt-captions';
 
 /**
- * Request caption tracks from the page-context script via postMessage.
- * Returns a promise that resolves with tracks array.
- * Times out after the specified ms.
+ * Request parsed caption cues directly from the page-context script.
+ * The page script extracts tracks, selects the best one, fetches data,
+ * and returns ready-to-use cues — all within YouTube's page context.
+ *
+ * Returns { cues: Array, track: { name, languageCode, kind } | null }
  */
-export function requestCaptionTracks(timeoutMs = 3000) {
+export function requestCaptionCues(timeoutMs = 8000) {
   return new Promise((resolve) => {
-    const requestId = 'req-' + Date.now();
+    const requestId = 'cues-' + Date.now();
     let resolved = false;
 
     const handler = (event) => {
       if (event.source !== window) return;
-      if (!event.data || event.data.type !== MSG_TYPE + '-response') return;
-      // Accept any response (auto, navigation, or our specific request)
-      if (event.data.tracks && event.data.tracks.length > 0) {
-        if (!resolved) {
-          resolved = true;
-          window.removeEventListener('message', handler);
-          console.log(LOG_PREFIX, 'Received tracks via postMessage:', event.data.tracks.length,
-            '(source:', event.data.requestId, ')');
-          resolve(event.data.tracks);
+      if (!event.data || event.data.type !== MSG_TYPE + '-cues-response') return;
+
+      if (!resolved) {
+        resolved = true;
+        window.removeEventListener('message', handler);
+        const cueCount = event.data.cues ? event.data.cues.length : 0;
+        console.log(LOG_PREFIX, 'Received', cueCount, 'cues via postMessage',
+          '(source:', event.data.requestId, ')');
+        if (event.data.track) {
+          console.log(LOG_PREFIX, 'Track:', event.data.track.name, event.data.track.languageCode);
         }
+        resolve({
+          cues: event.data.cues || [],
+          track: event.data.track || null,
+          error: event.data.error || null,
+        });
       }
     };
 
     window.addEventListener('message', handler);
 
     // Send request to page context script
-    window.postMessage({ type: MSG_TYPE + '-request', requestId }, '*');
+    window.postMessage({ type: MSG_TYPE + '-fetch-cues', requestId }, '*');
 
     // Timeout fallback
     setTimeout(() => {
       if (!resolved) {
         resolved = true;
         window.removeEventListener('message', handler);
-        console.log(LOG_PREFIX, 'postMessage timeout after', timeoutMs, 'ms');
-        resolve([]);
+        console.log(LOG_PREFIX, 'Cues request timeout after', timeoutMs, 'ms');
+        resolve({ cues: [], track: null, error: 'timeout' });
       }
     }, timeoutMs);
   });
 }
 
 /**
- * Extract caption tracks by parsing script tags in page HTML.
- * This works from the content script's isolated world.
+ * Setup a listener for auto-pushed cues from the page script
+ * (sent on page load and SPA navigation).
  */
-export function extractFromScriptTags() {
-  const scripts = document.querySelectorAll('script');
-  for (const script of scripts) {
-    const text = script.textContent;
-    if (!text || text.length < 100) continue;
-
-    // Look for "captionTracks" in the script content (fast pre-check)
-    if (!text.includes('captionTracks')) continue;
-
-    // Try to extract ytInitialPlayerResponse
-    const match = text.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});\s*(?:var|let|const|if|<\/script)/s);
-    if (match) {
-      try {
-        const data = JSON.parse(match[1]);
-        const tracks = getTracksFromPlayerResponse(data);
-        if (tracks && tracks.length > 0) {
-          console.log(LOG_PREFIX, 'Found tracks from script tags:', tracks.length);
-          return tracks;
-        }
-      } catch (e) {
-        // JSON parse failed, continue searching
-      }
+export function listenForAutoCues(callback) {
+  const handler = (event) => {
+    if (event.source !== window) return;
+    if (!event.data || event.data.type !== MSG_TYPE + '-cues-response') return;
+    // Only handle auto/navigation pushes
+    if (event.data.requestId === 'auto' || event.data.requestId === 'navigation') {
+      const cueCount = event.data.cues ? event.data.cues.length : 0;
+      console.log(LOG_PREFIX, 'Auto-received', cueCount, 'cues (source:', event.data.requestId, ')');
+      callback({
+        cues: event.data.cues || [],
+        track: event.data.track || null,
+      });
     }
-  }
-  return [];
-}
+  };
 
-function getTracksFromPlayerResponse(response) {
-  const captionData = response?.captions?.playerCaptionsTracklistRenderer;
-  if (!captionData || !captionData.captionTracks) return [];
-
-  return captionData.captionTracks.map(track => ({
-    baseUrl: track.baseUrl,
-    languageCode: track.languageCode,
-    name: track.name?.simpleText || track.name?.runs?.[0]?.text || track.languageCode,
-    kind: track.kind || '',
-    isTranslatable: track.isTranslatable || false,
-    vssId: track.vssId || '',
-  }));
-}
-
-/**
- * Combined extraction: try postMessage first, then script tags.
- */
-export async function extractCaptionTracks() {
-  // Method 1: Request from page-context script via postMessage
-  const tracks = await requestCaptionTracks(3000);
-  if (tracks.length > 0) return tracks;
-
-  // Method 2: Parse script tags (fallback)
-  try {
-    const scriptTracks = extractFromScriptTags();
-    if (scriptTracks.length > 0) return scriptTracks;
-  } catch (e) {
-    console.warn(LOG_PREFIX, 'Script tag parsing failed:', e.message);
-  }
-
-  console.warn(LOG_PREFIX, 'No caption tracks found');
-  return [];
-}
-
-/**
- * Fetch subtitle cues from a caption track URL.
- * IMPORTANT: YouTube's baseUrl contains a signature that validates all params.
- * Do NOT modify the URL (e.g., changing fmt) — it will invalidate the signature
- * and return empty/error responses. Use the URL as-is.
- */
-export async function fetchCaptionCues(baseUrl) {
-  try {
-    console.log(LOG_PREFIX, 'Fetching captions from:', baseUrl.substring(0, 120) + '...');
-
-    const response = await fetch(baseUrl);
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    const text = await response.text();
-    if (!text || text.length < 10) {
-      throw new Error('Empty response body');
-    }
-
-    // Detect format from URL or content
-    const url = new URL(baseUrl);
-    const fmt = url.searchParams.get('fmt') || '';
-
-    // Try JSON parse first (json3 format)
-    if (fmt === 'json3' || text.trimStart().startsWith('{')) {
-      try {
-        const data = JSON.parse(text);
-        const cues = parseJson3Data(data);
-        if (cues.length > 0) return cues;
-      } catch (e) {
-        console.log(LOG_PREFIX, 'Not valid JSON, trying XML...');
-      }
-    }
-
-    // Try XML parse (srv3 or default format)
-    if (text.includes('<text') || text.includes('<?xml')) {
-      const cues = parseSrv3XmlText(text);
-      if (cues.length > 0) return cues;
-    }
-
-    // If default format didn't work, the response might be in a different format
-    // Log what we got for debugging
-    console.warn(LOG_PREFIX, 'Unrecognized response format. First 200 chars:', text.substring(0, 200));
-    return [];
-  } catch (error) {
-    console.error(LOG_PREFIX, 'Failed to fetch captions:', error.message);
-    return [];
-  }
-}
-
-function parseJson3Data(data) {
-  const cues = [];
-
-  if (!data.events) return cues;
-
-  for (const event of data.events) {
-    if (!event.segs) continue;
-
-    const text = event.segs
-      .map(seg => seg.utf8)
-      .join('')
-      .replace(/\n/g, ' ')
-      .trim();
-
-    if (!text) continue;
-
-    const startMs = event.tStartMs || 0;
-    const durationMs = event.dDurationMs || 3000;
-
-    cues.push({
-      startTime: startMs / 1000,
-      endTime: (startMs + durationMs) / 1000,
-      text,
-    });
-  }
-
-  console.log(LOG_PREFIX, 'Parsed', cues.length, 'cues from json3 format');
-  return cues;
-}
-
-function parseSrv3XmlText(text) {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(text, 'text/xml');
-  const cues = [];
-
-  const textElements = doc.querySelectorAll('text');
-  for (const el of textElements) {
-    const start = parseFloat(el.getAttribute('start') || '0');
-    const dur = parseFloat(el.getAttribute('dur') || '3');
-    const content = el.textContent
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&#39;/g, "'")
-      .replace(/&quot;/g, '"')
-      .replace(/<[^>]*>/g, '')
-      .trim();
-
-    if (!content) continue;
-
-    cues.push({
-      startTime: start,
-      endTime: start + dur,
-      text: content,
-    });
-  }
-
-  console.log(LOG_PREFIX, 'Parsed', cues.length, 'cues from srv3 XML format');
-  return cues;
+  window.addEventListener('message', handler);
+  return () => window.removeEventListener('message', handler);
 }
 
 /**
