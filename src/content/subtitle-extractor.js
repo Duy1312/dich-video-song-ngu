@@ -73,46 +73,53 @@ export class SubtitleExtractor {
 
   /**
    * Observe DOM-rendered subtitles (e.g. YouTube captions).
-   * Polls until the container appears, then attaches a MutationObserver.
-   * Debounces rapid mutations and deduplicates identical text.
+   * For YouTube: always observes .ytp-caption-window-container (stable parent)
+   * and reads text from .ytp-caption-segment children on each mutation.
+   * Polls until the container appears, debounces, and deduplicates.
    */
-  observeDomSubtitles(containerSelector, onCueChange, maxRetries = 60) {
+  observeDomSubtitles(segmentSelector, onCueChange, maxRetries = 60) {
     let retries = 0;
+    const isYouTube = segmentSelector === '.ytp-caption-segment';
 
     const tryAttach = () => {
-      // YouTube captions live inside .ytp-caption-window-container
-      // and individual segments are .ytp-caption-segment
-      // We observe the parent container for any child changes
-      const container = document.querySelector(containerSelector);
+      let observeTarget = null;
 
-      if (container) {
-        console.log('[DịchVideo] Found caption container:', containerSelector);
-        this._attachDomObserver(container, containerSelector, onCueChange);
-        return;
+      if (isYouTube) {
+        // ALWAYS observe the stable parent container for YouTube
+        // YouTube destroys/recreates .ytp-caption-segment elements,
+        // so observing the segment directly would lose the observer
+        observeTarget = document.querySelector('.ytp-caption-window-container');
+        if (observeTarget) {
+          console.log('[DịchVideo] Attached observer to .ytp-caption-window-container');
+        }
+      } else {
+        observeTarget = document.querySelector(segmentSelector);
+        if (observeTarget) {
+          console.log('[DịchVideo] Attached observer to:', segmentSelector);
+        }
       }
 
-      // Also try the parent container for YouTube
-      if (containerSelector === '.ytp-caption-segment') {
-        const parentContainer = document.querySelector('.ytp-caption-window-container');
-        if (parentContainer) {
-          console.log('[DịchVideo] Found YouTube caption parent container, observing...');
-          this._attachDomObserver(parentContainer, containerSelector, onCueChange);
-          return;
-        }
+      if (observeTarget) {
+        this._attachDomObserver(observeTarget, segmentSelector, onCueChange);
+        return;
       }
 
       retries++;
       if (retries < maxRetries) {
         this._pollTimer = setTimeout(tryAttach, 1000);
+        if (retries % 10 === 0) {
+          console.log('[DịchVideo] Still waiting for caption container... attempt', retries);
+        }
       } else {
-        console.warn('[DịchVideo] Caption container not found after', maxRetries, 'retries');
+        console.warn('[DịchVideo] Caption container not found after', maxRetries, 'retries.',
+          'Make sure captions/CC are turned ON in the video player.');
       }
     };
 
     tryAttach();
   }
 
-  _attachDomObserver(container, segmentSelector, onCueChange) {
+  _attachDomObserver(observeTarget, segmentSelector, onCueChange) {
     if (this._domObserver) {
       this._domObserver.disconnect();
     }
@@ -121,16 +128,15 @@ export class SubtitleExtractor {
       // Debounce rapid mutations (YouTube updates char by char)
       if (this._debounceTimer) clearTimeout(this._debounceTimer);
       this._debounceTimer = setTimeout(() => {
-        // Collect all caption segment text
-        const segments = container.querySelectorAll
-          ? container.querySelectorAll(segmentSelector) || [container]
-          : [container];
-
+        // Always search for segments from the observe target
+        const segments = observeTarget.querySelectorAll(segmentSelector);
         let fullText = '';
-        if (segments.length > 0 && segments !== [container]) {
+
+        if (segments && segments.length > 0) {
           segments.forEach(seg => { fullText += seg.textContent; });
         } else {
-          fullText = container.textContent;
+          // Fallback: use the entire container text
+          fullText = observeTarget.textContent;
         }
 
         fullText = fullText.trim();
@@ -138,17 +144,19 @@ export class SubtitleExtractor {
         // Deduplicate — don't fire for same text
         if (fullText && fullText !== this._lastCueText) {
           this._lastCueText = fullText;
-          console.log('[DịchVideo] Caption detected:', fullText.substring(0, 50));
+          console.log('[DịchVideo] Caption detected:', fullText.substring(0, 80));
           onCueChange(fullText);
         }
       }, 300);
     });
 
-    this._domObserver.observe(container, {
+    this._domObserver.observe(observeTarget, {
       childList: true,
       subtree: true,
       characterData: true,
     });
+
+    console.log('[DịchVideo] MutationObserver active, waiting for captions...');
   }
 
   destroy() {
