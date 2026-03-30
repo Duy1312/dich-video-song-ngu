@@ -1,10 +1,14 @@
-/* === Hide native captions visually but keep them in DOM === */
-/* We use opacity:0 + pointer-events:none instead of display:none
-   because our MutationObserver needs the caption elements to exist
-   and update their text content for us to read.
-   YouTube renders captions even when opacity:0 — confirmed via debug. */
+/* === Hide native captions visually but keep them rendering in DOM === */
+/* IMPORTANT: Do NOT use opacity:0 or visibility:hidden — YouTube's JS
+   renderer checks visibility and stops writing caption text into the DOM
+   when elements appear invisible (IntersectionObserver returns ratio 0).
+   Instead, make text transparent so YouTube keeps rendering captions
+   and our MutationObserver can read the text content. */
 .ytp-caption-window-container .ytp-caption-window-bottom {
-  opacity: 0 !important;
+  color: transparent !important;
+  background: transparent !important;
+  text-shadow: none !important;
+  -webkit-text-fill-color: transparent !important;
   pointer-events: none !important;
 }
 
@@ -17,7 +21,6 @@
   z-index: 2147483646;
   text-align: center;
   pointer-events: none;
-  transition: opacity 0.15s ease;
   display: flex;
   flex-direction: column;
   align-items: center;

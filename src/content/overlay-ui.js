@@ -8,10 +8,21 @@ export class OverlayUI {
   }
 
   init() {
-    if (this._container) return;
+    if (this._container && this._container.isConnected) return;
+
+    // Clean up old detached container if any
+    if (this._container) {
+      this._container = null;
+      this._originalEl = null;
+      this._translatedEl = null;
+    }
 
     // Find the best parent to attach to
     const parent = this._findVideoContainer();
+    if (!parent) {
+      console.warn('[DịchVideo][Overlay] Could not find video container');
+      return;
+    }
     const parentPosition = getComputedStyle(parent).position;
     if (parentPosition === 'static') {
       parent.style.position = 'relative';
@@ -29,23 +40,28 @@ export class OverlayUI {
     this._container.appendChild(this._originalEl);
     this._container.appendChild(this._translatedEl);
 
+    // Start hidden — showSubtitle() will make it visible
+    this._container.style.display = 'none';
+
     parent.appendChild(this._container);
 
-    // Hide YouTube's native captions by injecting a style if not already done
-    this._hideNativeCaptions();
+    console.log('[DịchVideo][Overlay] Initialized, attached to', parent.id || parent.className);
   }
 
   _findVideoContainer() {
-    // For YouTube: use the .html5-video-container for precise positioning
-    const ytContainer = this._video.closest('.html5-video-container');
-    if (ytContainer) return ytContainer;
+    // For YouTube: use #movie_player so our overlay is at the same DOM level
+    // as YouTube's own overlays (captions, controls, gradient).
+    // .html5-video-container creates its own stacking context,
+    // trapping our z-index — overlay would render BEHIND YouTube's layers.
+    const ytPlayer = this._video.closest('#movie_player');
+    if (ytPlayer) return ytPlayer;
 
     // For other sites: use video's parent
     return this._video.parentElement;
   }
 
   _hideNativeCaptions() {
-    // CSS handles hiding via .ytp-caption-window-container { display:none }
+    // CSS handles hiding via .ytp-caption-window-container { opacity:0 }
     // But also try to disable tracks programmatically
     if (this._video.textTracks) {
       for (let i = 0; i < this._video.textTracks.length; i++) {
@@ -57,8 +73,23 @@ export class OverlayUI {
     }
   }
 
+  /**
+   * Ensure the overlay container is still in the DOM.
+   * YouTube may remove it during re-renders.
+   */
+  _ensureAttached() {
+    if (!this._container || !this._container.isConnected) {
+      console.log('[DịchVideo][Overlay] Container detached, re-attaching...');
+      this._container = null;
+      this._originalEl = null;
+      this._translatedEl = null;
+      this.init();
+    }
+  }
+
   showSubtitle(originalText, translatedText) {
-    if (!this._container) this.init();
+    this._ensureAttached();
+    if (!this._container) return;
 
     // Clear any pending hide timer
     if (this._hideTimer) {
@@ -66,6 +97,9 @@ export class OverlayUI {
       this._hideTimer = null;
     }
 
+    // Direct text swap — no animation.
+    // The settle timer already batches word-by-word updates,
+    // so changes are infrequent (~every 1-2s) and direct swap is clean.
     this._originalEl.textContent = originalText || '';
     this._translatedEl.textContent = translatedText || '';
 
@@ -77,11 +111,22 @@ export class OverlayUI {
     this._container.style.opacity = '1';
   }
 
+  /**
+   * Update only the translation line without touching the original.
+   * Prevents double-update flicker when translation arrives after settle.
+   */
+  updateTranslation(translatedText) {
+    this._ensureAttached();
+    if (!this._translatedEl) return;
+    this._translatedEl.textContent = translatedText || '';
+    this._translatedEl.style.display = translatedText ? '' : 'none';
+  }
+
   hide() {
-    if (this._container) {
+    if (this._container && this._container.isConnected) {
       this._container.style.opacity = '0';
       this._hideTimer = setTimeout(() => {
-        if (this._container) {
+        if (this._container && this._container.isConnected) {
           this._container.style.display = 'none';
         }
       }, 150);

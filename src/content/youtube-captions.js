@@ -15,8 +15,10 @@ const MSG_TYPE = 'dvsn-yt-captions';
 /**
  * Request the page script to activate YouTube captions.
  * Returns { tracks, selectedTrack, activated } or null on timeout.
+ * @param {number} timeoutMs - Max wait time
+ * @param {boolean} forceToggle - Force CC off/on cycle (use after SPA navigation)
  */
-export function requestActivateCaptions(timeoutMs = 12000) {
+export function requestActivateCaptions(timeoutMs = 12000, forceToggle = false) {
   return new Promise((resolve) => {
     let resolved = false;
 
@@ -43,7 +45,7 @@ export function requestActivateCaptions(timeoutMs = 12000) {
     window.addEventListener('message', handler);
 
     // Send activation request
-    window.postMessage({ type: MSG_TYPE + '-activate' }, '*');
+    window.postMessage({ type: MSG_TYPE + '-activate', forceToggle }, '*');
 
     // Timeout
     setTimeout(() => {

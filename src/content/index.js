@@ -1,10 +1,12 @@
 import { VideoDetector } from './video-detector.js';
 import { SubtitleExtractor } from './subtitle-extractor.js';
 import { SpeechRecognizer } from './speech-recognizer.js';
+import { AudioCaptureSTT } from './audio-capture-stt.js';
 import { OverlayUI } from './overlay-ui.js';
 import { SidePanelUI } from './side-panel-ui.js';
 import { ControlButton } from './control-button.js';
 import { requestActivateCaptions } from './youtube-captions.js';
+import { detectPlatform } from './platform-registry.js';
 import { DEFAULT_SETTINGS, CUE_BUFFER_AHEAD } from '../utils/constants.js';
 import '../styles/overlay.css';
 import '../styles/side-panel.css';
@@ -13,7 +15,7 @@ import '../styles/control-button.css';
 const LOG_PREFIX = '[DịchVideo]';
 
 class VideoTranslator {
-  constructor(video) {
+  constructor(video, options = {}) {
     this._video = video;
     this._settings = { ...DEFAULT_SETTINGS };
     this._extractor = new SubtitleExtractor();
@@ -21,13 +23,27 @@ class VideoTranslator {
     this._sidePanel = null;
     this._controlBtn = null;
     this._speechRecognizer = null;
+    this._audioCapture = null;
+    this._platform = detectPlatform(window.location.href);
     this._cues = [];
     this._translatedCues = new Map();
     this._currentCueIndex = -1;
     this._cueIdCounter = 0;
+    this._currentCueId = -1;
+    this._pendingCue = null;
+    this._settleTimer = null;
+    this._lastTranslation = '';
+    this._speculativeText = null;
+    this._speculativePromise = null;
     this._timeUpdateHandler = null;
     this._debounceTimer = null;
+    this._sttFallbackTimer = null;
+    this._isLiveMode = false;
+    this._captionSource = null;
+    this._domCaptionCount = 0;
     this._apiKeys = {};
+    this._isLiveMode = false;
+    this._isSpaNavigation = options.isSpaNavigation || false;
 
     console.log(LOG_PREFIX, 'VideoTranslator created for', video.src || video.currentSrc || '(no src yet)');
     this._loadSettings().then(() => this._loadApiKeys()).then(() => this._init());
@@ -139,16 +155,14 @@ class VideoTranslator {
 
   _tryExtractSubtitles() {
     console.log(LOG_PREFIX, 'Trying to extract subtitles...');
-    const tracks = this._extractor.findSubtitleTracks(this._video);
-    console.log(LOG_PREFIX, 'Found', tracks.length, 'TextTrack(s)');
+    console.log(LOG_PREFIX, 'Platform:', this._platform?.name || 'unknown');
 
-    if (tracks.length > 0) {
-      // Use first available subtitle track
+    // Use watchForTracks — handles both immediate and late-appearing TextTracks
+    this._extractor.watchForTracks(this._video, (tracks) => {
       const track = tracks[0].track;
-      track.mode = 'hidden'; // Enable but don't show native subtitles
+      track.mode = 'hidden';
       console.log(LOG_PREFIX, 'Using TextTrack:', track.label, track.language);
 
-      // Wait for cues to load
       let cueCheckCount = 0;
       const checkCues = () => {
         cueCheckCount++;
@@ -164,21 +178,53 @@ class VideoTranslator {
         }
       };
       checkCues();
-    } else {
-      // Try platform-specific extraction or fallback to speech recognition
-      this._tryPlatformSubtitles();
-    }
+    }, 8000);
+
+    // If watchForTracks times out (no tracks found within 8s),
+    // it doesn't call the callback — so also start platform subtitles after timeout
+    setTimeout(() => {
+      if (this._cues.length === 0 && !this._isLiveMode) {
+        console.log(LOG_PREFIX, 'No TextTracks after 8s, trying platform subtitles...');
+        this._tryPlatformSubtitles();
+      }
+    }, 9000);
   }
 
   _tryPlatformSubtitles() {
     const url = window.location.href;
     console.log(LOG_PREFIX, 'Trying platform-specific subtitles for:', url);
 
-    if (this._extractor.isYouTube(url)) {
-      console.log(LOG_PREFIX, 'YouTube detected, trying API captions first...');
-      this._tryYouTubeApiCaptions();
+    if (this._platform) {
+      console.log(LOG_PREFIX, `Platform "${this._platform.name}" detected, using config...`);
+
+      if (this._platform.name === 'youtube') {
+        // YouTube needs special handling: activate captions via player API
+        this._tryYouTubeApiCaptions();
+      } else {
+        // Generic platform: observe DOM captions using platform config
+        this._isLiveMode = true;
+        this._captionSource = null;
+        this._domCaptionCount = 0;
+
+        this._extractor.observeDomSubtitles(
+          this._platform,
+          (text) => {
+            this._domCaptionCount++;
+            this._captionSource = 'dom';
+            this._onLiveCue(text);
+          }
+        );
+
+        // Fallback to STT if no DOM captions after 15s
+        this._sttFallbackTimer = setTimeout(() => {
+          if (this._domCaptionCount === 0) {
+            console.log(LOG_PREFIX, '⚠️ No platform captions after 15s, falling back to STT...');
+            this._startSpeechRecognition();
+          }
+        }, 15000);
+      }
     } else {
-      // Fallback: speech recognition
+      // No platform match — try speech recognition / audio capture
       console.log(LOG_PREFIX, 'No platform match, trying speech recognition...');
       this._startSpeechRecognition();
     }
@@ -190,33 +236,106 @@ class VideoTranslator {
     // for caption segments. This is the most reliable approach because
     // YouTube's timedtext API returns empty responses from extensions.
 
-    console.log(LOG_PREFIX, 'Requesting caption activation via YouTube player API...');
-    const result = await requestActivateCaptions(12000);
+    // Detect if CC is already active — this means we're in SPA navigation
+    // and YouTube's caption renderer needs a track refresh via setOption.
+    const ccBtn = document.querySelector('.ytp-subtitles-button');
+    const ccAlreadyOn = ccBtn && ccBtn.getAttribute('aria-pressed') === 'true';
+    const needsForceToggle = this._isSpaNavigation || ccAlreadyOn;
+
+    console.log(LOG_PREFIX, 'Requesting caption activation via YouTube player API...',
+      needsForceToggle ? `(force toggle: spa=${this._isSpaNavigation}, ccOn=${ccAlreadyOn})` : '(initial load)');
+
+    // Attach DOM observer BEFORE sending activation request.
+    // This ensures we catch caption text as soon as YouTube starts rendering,
+    // especially during force toggle (CC off → 800ms → CC on).
+    this._isLiveMode = true;
+    this._captionSource = null;
+    this._domCaptionCount = 0;
+
+    this._extractor.observeDomSubtitles(
+      '.ytp-caption-segment',
+      (text) => {
+        this._domCaptionCount++;
+
+        // If STT fallback was started but DOM captions came back, stop STT
+        if (this._captionSource === 'stt' && this._speechRecognizer) {
+          console.log(LOG_PREFIX, '🔄 DOM captions recovered, stopping speech recognition');
+          this._speechRecognizer.destroy();
+          this._speechRecognizer = null;
+        }
+
+        this._captionSource = 'dom';
+        this._onLiveCue(text);
+      }
+    );
+
+    const result = await requestActivateCaptions(12000, needsForceToggle);
 
     if (result && result.activated) {
       const track = result.selectedTrack;
       console.log(LOG_PREFIX, `✅ Captions activated: "${track.name}" (${track.languageCode})`);
       console.log(LOG_PREFIX, 'Starting DOM observation for caption segments...');
     } else {
-      console.warn(LOG_PREFIX, 'Could not activate captions via player API, trying CC button fallback...');
+      console.warn(LOG_PREFIX, 'Could not activate captions via player API');
     }
 
-    // In all cases, observe DOM for caption text.
-    // Even if activation "failed", captions might already be on, or user may turn them on.
-    this._extractor.observeDomSubtitles(
-      '.ytp-caption-segment',
-      (text) => this._onLiveCue(text)
-    );
+    // Fallback: if no captions detected after 15s, start speech recognition
+    // (YouTube SPA navigation can cause slow caption rendering)
+    this._sttFallbackTimer = setTimeout(() => {
+      if (this._domCaptionCount === 0) {
+        console.log(LOG_PREFIX, '⚠️ No captions detected after 15s, falling back to speech recognition...');
+        this._startSpeechRecognition();
+      }
+    }, 15000);
   }
 
   _startSpeechRecognition() {
+    this._isLiveMode = true;
+    this._captionSource = 'stt';
+
+    // Try AudioCaptureSTT (Whisper) first if API key available and user prefers it
+    if (this._settings.sttProvider === 'whisper' && this._apiKeys.whisperApiKey) {
+      this._audioCapture = new AudioCaptureSTT({
+        onResult: ({ text }) => {
+          if (this._captionSource === 'stt') {
+            this._onLiveCue(text);
+          }
+        },
+        onError: (err) => {
+          console.warn(LOG_PREFIX, 'Audio capture error:', err.message, '— falling back to Web Speech');
+          this._audioCapture = null;
+          this._startWebSpeechFallback();
+        },
+        apiKey: this._apiKeys.whisperApiKey,
+        language: this._settings.targetLang,
+      });
+
+      if (this._audioCapture.isSupported()) {
+        console.log(LOG_PREFIX, 'Starting Whisper audio capture STT...');
+        this._audioCapture.start(this._video);
+        return;
+      } else {
+        console.warn(LOG_PREFIX, 'Audio capture not supported, falling back to Web Speech');
+        this._audioCapture = null;
+      }
+    }
+
+    this._startWebSpeechFallback();
+  }
+
+  _startWebSpeechFallback() {
     this._speechRecognizer = new SpeechRecognizer({
-      onResult: ({ text }) => this._onLiveCue(text),
+      onResult: ({ text }) => {
+        // Only process if STT is still the active source
+        if (this._captionSource === 'stt') {
+          this._onLiveCue(text);
+        }
+      },
       onError: (err) => console.warn(LOG_PREFIX, 'STT error:', err.message),
     });
 
     if (this._speechRecognizer.isSupported()) {
-      console.log(LOG_PREFIX, 'Starting speech recognition...');
+      console.log(LOG_PREFIX, 'Starting Web Speech API recognition...');
       this._speechRecognizer.start();
     } else {
       console.warn(LOG_PREFIX, 'Speech recognition not supported in this browser');
@@ -224,30 +343,140 @@ class VideoTranslator {
   }
 
   _onLiveCue(text) {
-    const id = this._cueIdCounter++;
-    const startTime = this._video.currentTime;
-    const cue = { startTime, endTime: startTime + 5, text };
-    this._cues.push(cue);
-    console.log(LOG_PREFIX, `Live cue #${id}:`, text.substring(0, 60));
-    this._translateAndDisplay(id, cue);
-  }
+    // YouTube auto-captions build up word-by-word, firing rapidly.
+    // Strategy: SPECULATIVE PRE-TRANSLATION
+    //   1. Fire translation immediately on first text (don't wait for settle)
+    //   2. If text changes during settle window, fire another translation
+    //   3. Whichever finishes first for the final text wins
+    // This eliminates the 350ms + API latency gap between original and translated.
 
-  async _translateAndDisplay(id, cue) {
-    // Show original immediately
-    if (this._settings.displayMode !== 'panel') {
-      this._overlay.showSubtitle(cue.text, '...');
+    console.log(LOG_PREFIX, `Caption detected [${this._captionSource || 'unknown'}]:`, text.substring(0, 60));
+
+    // Cancel any pending settle timer
+    if (this._settleTimer) {
+      clearTimeout(this._settleTimer);
+    }
+    // Cancel any pending auto-hide timer
+    if (this._liveHideTimer) {
+      clearTimeout(this._liveHideTimer);
     }
 
+    const isNewCue = !this._pendingCue;
+
+    // Update the current pending cue text (don't create new cue each word)
+    if (!this._pendingCue) {
+      this._pendingCue = {
+        id: this._cueIdCounter++,
+        startTime: this._video.currentTime,
+        text,
+      };
+    } else {
+      this._pendingCue.text = text;
+    }
+
+    this._currentCueId = this._pendingCue.id;
+
+    // Show original text IMMEDIATELY (before settle) — user sees something right away
+    if (this._settings.displayMode !== 'panel') {
+      this._overlay.showSubtitle(text, this._lastTranslation || '');
+    }
+
+    // SPECULATIVE PRE-TRANSLATION: fire translation right away on first text
+    // and also on significant text changes (>10 chars different).
+    // This starts the API call ~350ms earlier than waiting for settle.
+    const pendingId = this._pendingCue.id;
+    if (isNewCue || !this._speculativeText ||
+        Math.abs(text.length - this._speculativeText.length) > 10) {
+      this._speculativeText = text;
+      this._speculativePromise = this._requestTranslation(text);
+      // When speculative result arrives, update overlay immediately
+      // (only if this cue is still current and text hasn't changed much)
+      this._speculativePromise.then(translation => {
+        if (this._currentCueId === pendingId && this._settings.displayMode !== 'panel') {
+          // Only show speculative result if text is still similar
+          const currentText = this._pendingCue?.text || text;
+          if (currentText === text || !this._pendingCue) {
+            this._overlay.updateTranslation(translation);
+            this._lastTranslation = translation;
+          }
+        }
+      }).catch(() => {}); // Ignore speculative failures
+    }
+
+    // Wait for text to settle before finalizing
+    // 350ms is enough — YouTube captions stabilize within ~200-300ms
+    this._settleTimer = setTimeout(() => {
+      const cue = {
+        startTime: this._pendingCue.startTime,
+        endTime: this._video.currentTime + 3,
+        text: this._pendingCue.text,
+      };
+      const id = this._pendingCue.id;
+      const speculativeText = this._speculativeText;
+      const speculativePromise = this._speculativePromise;
+      this._cues.push(cue);
+      this._pendingCue = null;
+      this._speculativeText = null;
+      this._speculativePromise = null;
+      console.log(LOG_PREFIX, `Settled cue #${id}:`, cue.text.substring(0, 60));
+
+      // Show original text immediately when settled.
+      if (this._settings.displayMode !== 'panel') {
+        this._overlay.showSubtitle(cue.text, this._lastTranslation || '');
+      }
+
+      // If the settled text is the same as what we speculatively translated,
+      // reuse that result instead of making another API call.
+      if (speculativeText === cue.text && speculativePromise) {
+        console.log(LOG_PREFIX, `Reusing speculative translation for cue #${id}`);
+        speculativePromise.then(translation => {
+          this._translatedCues.set(id, translation);
+          this._lastTranslation = translation;
+          if (id >= this._currentCueId && this._settings.displayMode !== 'panel') {
+            this._overlay.updateTranslation(translation);
+          }
+          if (this._sidePanel) {
+            try {
+              this._sidePanel.addCue(id, {
+                startTime: cue.startTime,
+                originalText: cue.text,
+                translatedText: translation,
+              });
+              this._sidePanel.setActiveCue(id);
+            } catch (e) {}
+          }
+        }).catch(() => {
+          // Speculative failed, do a fresh translation
+          this._translateSettledCue(id, cue);
+        });
+      } else {
+        // Text changed significantly after speculative — translate final text
+        this._translateSettledCue(id, cue);
+      }
+
+      // Auto-hide overlay after 8s if no new caption arrives
+      this._liveHideTimer = setTimeout(() => {
+        console.log(LOG_PREFIX, 'Auto-hiding overlay (no new caption for 8s)');
+        this._overlay.hide();
+      }, 8000);
+    }, 350);
+  }
+
+  async _translateSettledCue(id, cue) {
     // Request translation from background
     const translation = await this._requestTranslation(cue.text);
 
     this._translatedCues.set(id, translation);
+    this._lastTranslation = translation;
 
-    if (this._settings.displayMode !== 'panel') {
-      this._overlay.showSubtitle(cue.text, translation);
+    // Only update overlay if this is still the latest cue.
+    // Only update the TRANSLATION line — don't re-set the original
+    // (it was already set when the cue settled).
+    if (id >= this._currentCueId && this._settings.displayMode !== 'panel') {
+      this._overlay.updateTranslation(translation);
     }
 
-    // Update side panel (safe — addCue checks if panel body exists)
+    // Update side panel
     if (this._sidePanel) {
       try {
         this._sidePanel.addCue(id, {
@@ -297,12 +526,19 @@ class VideoTranslator {
     const end = Math.min(fromIndex + CUE_BUFFER_AHEAD, this._cues.length);
     for (let i = fromIndex; i < end; i++) {
       if (!this._translatedCues.has(i)) {
-        this._translateAndDisplay(i, this._cues[i]);
+        this._translateSettledCue(i, this._cues[i]);
       }
     }
   }
 
   _onTimeUpdate() {
+    // Skip time-based cue matching when using live DOM captions.
+    // Live cues are driven by _onLiveCue → _translateSettledCue,
+    // not by time-based lookup. The _onTimeUpdate hide() was killing
+    // the overlay after endTime expired (3s) even though new captions
+    // were still being observed.
+    if (this._isLiveMode) return;
+
     const currentTime = this._video.currentTime;
     const cue = this._extractor.getCueAtTime(this._cues, currentTime);
 
@@ -333,6 +569,9 @@ class VideoTranslator {
 
   destroy() {
     console.log(LOG_PREFIX, 'Destroying VideoTranslator');
+    if (this._settleTimer) clearTimeout(this._settleTimer);
+    if (this._liveHideTimer) clearTimeout(this._liveHideTimer);
+    if (this._sttFallbackTimer) clearTimeout(this._sttFallbackTimer);
     if (this._timeUpdateHandler) {
       this._video.removeEventListener('timeupdate', this._timeUpdateHandler);
     }
@@ -341,19 +580,22 @@ class VideoTranslator {
     this._sidePanel?.destroy();
     this._controlBtn?.destroy();
     this._speechRecognizer?.destroy();
+    this._audioCapture?.destroy();
   }
 }
 
 // --- Entry Point ---
 
 const translators = new Map();
-let currentUrl = window.location.href;
+let currentVideoId = _extractYouTubeVideoId(window.location.href);
+let isSpaNav = false;
 
 const detector = new VideoDetector({
   onVideoFound: (video) => {
     if (!translators.has(video)) {
-      console.log(LOG_PREFIX, '🎥 Video found! Creating translator...');
-      translators.set(video, new VideoTranslator(video));
+      console.log(LOG_PREFIX, '🎥 Video found! Creating translator...', isSpaNav ? '(SPA nav)' : '(initial)');
+      translators.set(video, new VideoTranslator(video, { isSpaNavigation: isSpaNav }));
+      isSpaNav = false; // Reset after use
     }
   },
   onVideoRemoved: (video) => {
@@ -369,27 +611,85 @@ detector.observe();
 console.log(LOG_PREFIX, '✅ Content script loaded on:', window.location.href);
 
 // --- YouTube SPA Navigation Support ---
-// YouTube uses pushState/replaceState for navigation — page doesn't reload
-// We need to detect URL changes and re-scan for videos
+// YouTube uses pushState/replaceState for navigation — page doesn't reload.
+// We need to detect when the VIDEO changes (not just URL parameters).
+// YouTube frequently calls replaceState to update &t=, &list=, etc.
+// which would cause false re-initializations and kill active translators.
+
+/**
+ * Extract YouTube video ID from URL.
+ * Returns null for non-watch pages (home, search, channel, etc.)
+ */
+function _extractYouTubeVideoId(url) {
+  try {
+    const u = new URL(url);
+    if (u.hostname.includes('youtube.com') && u.pathname === '/watch') {
+      return u.searchParams.get('v') || null;
+    }
+    // Shorts
+    const shortsMatch = u.pathname.match(/\/shorts\/([^/?]+)/);
+    if (shortsMatch) return shortsMatch[1];
+  } catch (e) {}
+  return null;
+}
+
+/**
+ * Check if navigation represents a real page/video change.
+ * For YouTube: only react when video ID changes.
+ * For other sites: react to any URL change.
+ */
+function _isSignificantNavigation(oldUrl, newUrl) {
+  if (oldUrl === newUrl) return false;
+
+  const isYouTube = /youtube\.com/.test(window.location.hostname);
+  if (!isYouTube) return true;
+
+  const oldId = _extractYouTubeVideoId(oldUrl);
+  const newId = _extractYouTubeVideoId(newUrl);
+
+  // If video ID didn't change, it's just a parameter update (t=, list=, etc.)
+  if (oldId && newId && oldId === newId) {
+    console.log(LOG_PREFIX, '🔄 URL changed but same video ID, ignoring:', newUrl.split('?')[1]?.substring(0, 40));
+    return false;
+  }
+
+  return true;
+}
+
+let navDebounceTimer = null;
+let lastCheckedUrl = window.location.href;
 
 function handleUrlChange() {
   const newUrl = window.location.href;
-  if (newUrl !== currentUrl) {
-    console.log(LOG_PREFIX, '🔄 URL changed:', currentUrl, '→', newUrl);
-    currentUrl = newUrl;
+  if (!_isSignificantNavigation(lastCheckedUrl, newUrl)) return;
 
-    // Give YouTube time to render the new page
-    setTimeout(() => {
-      console.log(LOG_PREFIX, 'Re-scanning for videos after navigation...');
-      // Destroy old translators (YouTube reuses video element, but subtitles change)
-      translators.forEach((translator, video) => {
-        translator.destroy();
-      });
-      translators.clear();
-      // Re-scan
-      detector.scan();
-    }, 2000);
+  console.log(LOG_PREFIX, '🔄 Video changed:',
+    _extractYouTubeVideoId(lastCheckedUrl), '→', _extractYouTubeVideoId(newUrl) || '(non-watch page)');
+  lastCheckedUrl = newUrl;
+  currentVideoId = _extractYouTubeVideoId(newUrl);
+
+  // Debounce: cancel any pending re-scan from a previous rapid navigation
+  if (navDebounceTimer) {
+    clearTimeout(navDebounceTimer);
+    console.log(LOG_PREFIX, 'Debounced previous re-scan timer');
   }
+
+  // Give YouTube time to render the new page
+  navDebounceTimer = setTimeout(() => {
+    navDebounceTimer = null;
+    console.log(LOG_PREFIX, 'Re-scanning for videos after navigation...');
+    // Mark next translator as SPA navigation (force CC toggle)
+    isSpaNav = true;
+    // Destroy old translators (YouTube reuses video element, but subtitles change)
+    translators.forEach((translator, video) => {
+      translator.destroy();
+    });
+    translators.clear();
+    // Reset tracked videos so scan() treats reused <video> elements as new
+    detector.reset();
+    // Re-scan
+    detector.scan();
+  }, 2000);
 }
 
 // Listen for popstate (back/forward buttons)
@@ -410,7 +710,15 @@ history.replaceState = function(...args) {
 };
 
 // Also listen for yt-navigate-finish (YouTube-specific event)
+// YouTube fires this on INITIAL page load too, not just SPA navigation.
+// Ignore it for the first 5 seconds after content script loads.
+const scriptLoadTime = Date.now();
 window.addEventListener('yt-navigate-finish', () => {
-  console.log(LOG_PREFIX, '🔄 YouTube navigation finished');
+  const elapsed = Date.now() - scriptLoadTime;
+  if (elapsed < 5000) {
+    console.log(LOG_PREFIX, '🔄 YouTube navigation finished (ignored — initial load, elapsed:', elapsed, 'ms)');
+    return;
+  }
+  console.log(LOG_PREFIX, '🔄 YouTube navigation finished (elapsed:', elapsed, 'ms)');
   handleUrlChange();
 });

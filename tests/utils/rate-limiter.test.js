@@ -16,7 +16,10 @@ describe('RateLimiter', () => {
   test('executes single request immediately', async () => {
     const fn = jest.fn().mockResolvedValue('result');
     const promise = limiter.enqueue(fn);
-    await jest.runAllTimersAsync();
+    // Flush microtask (queueMicrotask) + async fn resolution
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
     const result = await promise;
     expect(fn).toHaveBeenCalledTimes(1);
     expect(result).toBe('result');
@@ -31,7 +34,11 @@ describe('RateLimiter', () => {
     const p2 = limiter.enqueue(fn2);
     const p3 = limiter.enqueue(fn3);
 
-    await jest.runAllTimersAsync();
+    // Flush microtasks for batch processing
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
 
     const results = await Promise.all([p1, p2, p3]);
     expect(results).toEqual(['a', 'b', 'c']);
@@ -46,21 +53,13 @@ describe('RateLimiter', () => {
 
     const promises = [1, 2, 3, 4, 5].map(id => limiter.enqueue(makeFn(id)));
 
-    // Advance the initial setTimeout(0) to kick off first batch
-    jest.advanceTimersByTime(0);
-    // Flush microtasks: fn() calls are synchronous inside the map, so all 3 run
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    // Flush microtasks for first batch (3 items via queueMicrotask)
+    for (let i = 0; i < 10; i++) await Promise.resolve();
     expect(calls.length).toBe(3);
 
     // Advance past the 100ms inter-batch delay, then flush next batch microtasks
     jest.advanceTimersByTime(100);
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
     expect(calls.length).toBe(5);
 
     await Promise.all(promises);

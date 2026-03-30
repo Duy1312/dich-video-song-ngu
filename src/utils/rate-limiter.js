@@ -12,9 +12,8 @@ export class RateLimiter {
       this._queue.push({ fn, resolve, reject });
       if (!this._processing) {
         this._processing = true;
-        // Defer batch processing so multiple synchronous enqueue() calls
-        // can all add to the queue before the first batch runs
-        this._timer = setTimeout(() => this._processBatch(), 0);
+        // Defer to microtask so synchronously-enqueued items batch together
+        Promise.resolve().then(() => this._processBatch());
       }
     });
   }
