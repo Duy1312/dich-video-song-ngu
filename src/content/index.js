@@ -38,11 +38,12 @@ class VideoTranslator {
     this._timeUpdateHandler = null;
     this._debounceTimer = null;
     this._sttFallbackTimer = null;
+    this._liveHideTimer = null;
     this._isLiveMode = false;
     this._captionSource = null;
     this._domCaptionCount = 0;
+    this._platformFallbackStarted = false;
     this._apiKeys = {};
-    this._isLiveMode = false;
     this._isSpaNavigation = options.isSpaNavigation || false;
 
     console.log(LOG_PREFIX, 'VideoTranslator created for', video.src || video.currentSrc || '(no src yet)');
@@ -159,6 +160,13 @@ class VideoTranslator {
 
     // Use watchForTracks — handles both immediate and late-appearing TextTracks
     this._extractor.watchForTracks(this._video, (tracks) => {
+      // Guard: watchForTracks may call back with empty array on timeout
+      if (!tracks || tracks.length === 0) {
+        console.log(LOG_PREFIX, 'watchForTracks returned no tracks, trying platform subtitles...');
+        this._startPlatformFallback();
+        return;
+      }
+
       const track = tracks[0].track;
       track.mode = 'hidden';
       console.log(LOG_PREFIX, 'Using TextTrack:', track.label, track.language);
@@ -174,20 +182,28 @@ class VideoTranslator {
           setTimeout(checkCues, 500);
         } else {
           console.warn(LOG_PREFIX, 'TextTrack cues never loaded, falling back to platform subtitles');
-          this._tryPlatformSubtitles();
+          this._startPlatformFallback();
         }
       };
       checkCues();
     }, 8000);
 
-    // If watchForTracks times out (no tracks found within 8s),
-    // it doesn't call the callback — so also start platform subtitles after timeout
+    // Safety net: if neither watchForTracks nor platform started after 9s
     setTimeout(() => {
-      if (this._cues.length === 0 && !this._isLiveMode) {
-        console.log(LOG_PREFIX, 'No TextTracks after 8s, trying platform subtitles...');
-        this._tryPlatformSubtitles();
+      if (this._cues.length === 0 && !this._isLiveMode && !this._platformFallbackStarted) {
+        console.log(LOG_PREFIX, 'No subtitles after 9s, trying platform subtitles...');
+        this._startPlatformFallback();
       }
     }, 9000);
+  }
+
+  /**
+   * Start platform-specific subtitle detection. Guarded against double-calls.
+   */
+  _startPlatformFallback() {
+    if (this._platformFallbackStarted) return;
+    this._platformFallbackStarted = true;
+    this._tryPlatformSubtitles();
   }
 
   _tryPlatformSubtitles() {
@@ -572,6 +588,7 @@ class VideoTranslator {
     if (this._settleTimer) clearTimeout(this._settleTimer);
     if (this._liveHideTimer) clearTimeout(this._liveHideTimer);
     if (this._sttFallbackTimer) clearTimeout(this._sttFallbackTimer);
+    if (this._debounceTimer) clearTimeout(this._debounceTimer);
     if (this._timeUpdateHandler) {
       this._video.removeEventListener('timeupdate', this._timeUpdateHandler);
     }
