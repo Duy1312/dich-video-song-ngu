@@ -39,15 +39,19 @@ class VideoTranslator {
     this._debounceTimer = null;
     this._sttFallbackTimer = null;
     this._liveHideTimer = null;
+    this._trackFallbackTimer = null;
     this._isLiveMode = false;
     this._captionSource = null;
     this._domCaptionCount = 0;
     this._platformFallbackStarted = false;
+    this._destroyed = false;
     this._apiKeys = {};
     this._isSpaNavigation = options.isSpaNavigation || false;
 
     console.log(LOG_PREFIX, 'VideoTranslator created for', video.src || video.currentSrc || '(no src yet)');
-    this._loadSettings().then(() => this._loadApiKeys()).then(() => this._init());
+    this._loadSettings().then(() => this._loadApiKeys()).then(() => {
+      if (!this._destroyed) this._init();
+    });
   }
 
   async _loadSettings() {
@@ -160,6 +164,8 @@ class VideoTranslator {
 
     // Use watchForTracks — handles both immediate and late-appearing TextTracks
     this._extractor.watchForTracks(this._video, (tracks) => {
+      if (this._destroyed) return; // zombie guard
+
       // Guard: watchForTracks may call back with empty array on timeout
       if (!tracks || tracks.length === 0) {
         console.log(LOG_PREFIX, 'watchForTracks returned no tracks, trying platform subtitles...');
@@ -173,6 +179,7 @@ class VideoTranslator {
 
       let cueCheckCount = 0;
       const checkCues = () => {
+        if (this._destroyed) return; // zombie guard
         cueCheckCount++;
         if (track.cues && track.cues.length > 0) {
           this._cues = this._extractor.getAllCues(track);
@@ -189,7 +196,8 @@ class VideoTranslator {
     }, 8000);
 
     // Safety net: if neither watchForTracks nor platform started after 9s
-    setTimeout(() => {
+    this._trackFallbackTimer = setTimeout(() => {
+      if (this._destroyed) return;
       if (this._cues.length === 0 && !this._isLiveMode && !this._platformFallbackStarted) {
         console.log(LOG_PREFIX, 'No subtitles after 9s, trying platform subtitles...');
         this._startPlatformFallback();
@@ -225,6 +233,7 @@ class VideoTranslator {
         this._extractor.observeDomSubtitles(
           this._platform,
           (text) => {
+            if (this._destroyed) return; // zombie guard
             this._domCaptionCount++;
             this._captionSource = 'dom';
             this._onLiveCue(text);
@@ -233,6 +242,7 @@ class VideoTranslator {
 
         // Fallback to STT if no DOM captions after 15s
         this._sttFallbackTimer = setTimeout(() => {
+          if (this._destroyed) return; // zombie guard
           if (this._domCaptionCount === 0) {
             console.log(LOG_PREFIX, '⚠️ No platform captions after 15s, falling back to STT...');
             this._startSpeechRecognition();
@@ -269,8 +279,9 @@ class VideoTranslator {
     this._domCaptionCount = 0;
 
     this._extractor.observeDomSubtitles(
-      '.ytp-caption-segment',
+      this._platform,
       (text) => {
+        if (this._destroyed) return; // zombie guard
         this._domCaptionCount++;
 
         // If STT fallback was started but DOM captions came back, stop STT
@@ -286,6 +297,7 @@ class VideoTranslator {
     );
 
     const result = await requestActivateCaptions(12000, needsForceToggle);
+    if (this._destroyed) return; // zombie guard after await
 
     if (result && result.activated) {
       const track = result.selectedTrack;
@@ -298,6 +310,7 @@ class VideoTranslator {
     // Fallback: if no captions detected after 15s, start speech recognition
     // (YouTube SPA navigation can cause slow caption rendering)
     this._sttFallbackTimer = setTimeout(() => {
+      if (this._destroyed) return; // zombie guard
       if (this._domCaptionCount === 0) {
         console.log(LOG_PREFIX, '⚠️ No captions detected after 15s, falling back to speech recognition...');
         this._startSpeechRecognition();
@@ -359,6 +372,7 @@ class VideoTranslator {
   }
 
   _onLiveCue(text) {
+    if (this._destroyed) return; // zombie guard
     // YouTube auto-captions build up word-by-word, firing rapidly.
     // Strategy: SPECULATIVE PRE-TRANSLATION
     //   1. Fire translation immediately on first text (don't wait for settle)
@@ -585,9 +599,11 @@ class VideoTranslator {
 
   destroy() {
     console.log(LOG_PREFIX, 'Destroying VideoTranslator');
+    this._destroyed = true;
     if (this._settleTimer) clearTimeout(this._settleTimer);
     if (this._liveHideTimer) clearTimeout(this._liveHideTimer);
     if (this._sttFallbackTimer) clearTimeout(this._sttFallbackTimer);
+    if (this._trackFallbackTimer) clearTimeout(this._trackFallbackTimer);
     if (this._debounceTimer) clearTimeout(this._debounceTimer);
     if (this._timeUpdateHandler) {
       this._video.removeEventListener('timeupdate', this._timeUpdateHandler);
