@@ -396,6 +396,12 @@ class VideoTranslator {
 
     const isNewCue = !this._pendingCue;
 
+    // Clear stale translation when a genuinely new cue starts,
+    // so the overlay doesn't show the previous cue's Vietnamese text.
+    if (isNewCue) {
+      this._lastTranslation = '';
+    }
+
     // Update the current pending cue text (don't create new cue each word)
     if (!this._pendingCue) {
       this._pendingCue = {
