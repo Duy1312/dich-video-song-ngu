@@ -8,6 +8,8 @@ export class OverlayUI {
     this._hideTimer = null;
     this._hoverTimer = null;
     this._onWordTranslate = null;
+    this._activeWord = null;
+    this._wasPlaying = false;
     this._currentOriginalText = '';
     this._currentTranslatedText = '';
   }
@@ -206,6 +208,12 @@ export class OverlayUI {
 
     // Debounce: wait 150ms before showing tooltip
     this._hoverTimer = setTimeout(async () => {
+      // Pause video while hovering on a word
+      if (this._video && !this._video.paused) {
+        this._wasPlaying = true;
+        this._video.pause();
+      }
+
       if (!this._onWordTranslate) {
         // No callback — just show the word itself
         this._showTooltip(cleanWord, spanEl);
@@ -216,31 +224,43 @@ export class OverlayUI {
       //                        translated word → translate back to source (en)
       const targetLang = lang === 'original' ? 'vi' : 'en';
 
+      // Track which word we're translating
+      this._activeWord = cleanWord;
+
       // Show loading state
       this._showTooltip('...', spanEl);
 
       try {
         const translation = await this._onWordTranslate(cleanWord, targetLang);
         // Only show if tooltip is still for this word
-        if (this._tooltipEl && this._tooltipEl.dataset.word === cleanWord) {
+        if (this._activeWord === cleanWord) {
           this._showTooltip(translation, spanEl, cleanWord);
         }
       } catch (e) {
         // On error, just show the word
-        this._showTooltip(cleanWord, spanEl);
+        if (this._activeWord === cleanWord) {
+          this._showTooltip(cleanWord, spanEl);
+        }
       }
     }, 150);
   }
 
   /**
-   * Handle mouse leaving a word span — hide tooltip.
+   * Handle mouse leaving a word span — hide tooltip, resume video.
    */
   _onWordLeave() {
     if (this._hoverTimer) {
       clearTimeout(this._hoverTimer);
       this._hoverTimer = null;
     }
+    this._activeWord = null;
     this._hideTooltip();
+
+    // Resume video if it was playing before hover
+    if (this._wasPlaying && this._video) {
+      this._video.play();
+      this._wasPlaying = false;
+    }
   }
 
   /**
