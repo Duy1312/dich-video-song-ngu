@@ -244,27 +244,26 @@ export class SubtitleExtractor {
       let fullText = '';
 
       if (isYouTube) {
-        // YouTube: read from .ytp-caption-window-bottom windows
+        // YouTube: read only the LAST (newest) caption window.
+        // YouTube shows multiple .ytp-caption-window-bottom elements
+        // simultaneously (previous line fading out + new line appearing).
+        // Reading all of them concatenates old + new text, causing duplicates.
         const captionWindows = container.querySelectorAll(
           platform.captionWindowSelector || '.ytp-caption-window-bottom'
         );
-        const lines = [];
 
-        captionWindows.forEach(win => {
-          const segments = win.querySelectorAll(captionSelector);
-          if (segments.length > 0) {
-            const words = [];
-            segments.forEach(seg => {
-              const text = seg.textContent.trim();
-              if (text && !YT_UI_PATTERNS.some(p => p.test(text))) {
-                words.push(text);
-              }
-            });
-            const lineText = words.join(' ');
-            if (lineText) lines.push(lineText);
-          }
-        });
-        fullText = lines.join(' ');
+        if (captionWindows.length > 0) {
+          const lastWin = captionWindows[captionWindows.length - 1];
+          const segments = lastWin.querySelectorAll(captionSelector);
+          const words = [];
+          segments.forEach(seg => {
+            const text = seg.textContent.trim();
+            if (text && !YT_UI_PATTERNS.some(p => p.test(text))) {
+              words.push(text);
+            }
+          });
+          fullText = words.join(' ');
+        }
       } else if (typeof platform.readCaptions === 'function') {
         // Platform has custom reader
         fullText = platform.readCaptions(container, captionSelector);
