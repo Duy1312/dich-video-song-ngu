@@ -93,6 +93,9 @@ class VideoTranslator {
     this._overlay.init();
     this._overlay.setFontSize(this._settings.fontSize || 18);
     this._overlay.setBackground(this._settings.subtitleBackground || false);
+    this._overlay.setWordTranslateCallback((word, targetLang) =>
+      this._requestWordTranslation(word, targetLang)
+    );
     this._sidePanel = new SidePanelUI({
       onCueClick: (time) => { this._video.currentTime = time; },
     });
@@ -408,7 +411,7 @@ class VideoTranslator {
 
     // Show original text IMMEDIATELY (before settle) — user sees something right away
     if (this._settings.displayMode !== 'panel') {
-      this._overlay.showSubtitle(text, this._lastTranslation || '');
+      this._overlay.showSubtitle(text, this._lastTranslation || '...');
     }
 
     // SPECULATIVE PRE-TRANSLATION: fire translation right away on first text
@@ -419,16 +422,14 @@ class VideoTranslator {
         Math.abs(text.length - this._speculativeText.length) > 10) {
       this._speculativeText = text;
       this._speculativePromise = this._requestTranslation(text);
-      // When speculative result arrives, update overlay immediately
-      // (only if this cue is still current and text hasn't changed much)
+      // When speculative result arrives, update overlay immediately.
+      // Show partial translation right away — don't wait for settle.
+      // Even if text has since changed slightly (more words added),
+      // a partial translation is better than nothing for 1+ second.
       this._speculativePromise.then(translation => {
         if (this._currentCueId === pendingId && this._settings.displayMode !== 'panel') {
-          // Only show speculative result if text is still similar
-          const currentText = this._pendingCue?.text || text;
-          if (currentText === text || !this._pendingCue) {
-            this._overlay.updateTranslation(translation);
-            this._lastTranslation = translation;
-          }
+          this._overlay.updateTranslation(translation);
+          this._lastTranslation = translation;
         }
       }).catch(() => {}); // Ignore speculative failures
     }
@@ -452,7 +453,7 @@ class VideoTranslator {
 
       // Show original text immediately when settled.
       if (this._settings.displayMode !== 'panel') {
-        this._overlay.showSubtitle(cue.text, this._lastTranslation || '');
+        this._overlay.showSubtitle(cue.text, this._lastTranslation || '...');
       }
 
       // If the settled text is the same as what we speculatively translated,
@@ -523,6 +524,7 @@ class VideoTranslator {
   async _requestTranslation(text) {
     return new Promise((resolve) => {
       if (typeof chrome !== 'undefined' && chrome.runtime) {
+        console.log(LOG_PREFIX, '📤 Sending translate request:', text.substring(0, 40), '→', this._settings.targetLang);
         chrome.runtime.sendMessage(
           {
             type: 'translate',
@@ -534,20 +536,58 @@ class VideoTranslator {
           },
           (response) => {
             if (chrome.runtime.lastError) {
-              console.warn(LOG_PREFIX, 'Translation message error:', chrome.runtime.lastError.message);
+              console.warn(LOG_PREFIX, '❌ Translation message error:', chrome.runtime.lastError.message);
               resolve(text);
               return;
             }
             if (response?.success) {
+              console.log(LOG_PREFIX, '✅ Translation received:', response.translation.substring(0, 40));
               resolve(response.translation);
             } else {
-              console.warn(LOG_PREFIX, 'Translation failed:', response?.error);
+              console.warn(LOG_PREFIX, '❌ Translation failed:', response?.error, 'response:', response);
               resolve(text); // Fallback to original
             }
           }
         );
       } else {
+        console.warn(LOG_PREFIX, '❌ chrome.runtime not available');
         resolve(text);
+      }
+    });
+  }
+
+  /**
+   * Translate a single word for the hover tooltip.
+   * @param {string} word - The word to translate
+   * @param {string} targetLang - Target language code (e.g., 'vi' or 'en')
+   * @returns {Promise<string>} The translated word
+   */
+  async _requestWordTranslation(word, targetLang) {
+    return new Promise((resolve) => {
+      if (typeof chrome !== 'undefined' && chrome.runtime) {
+        chrome.runtime.sendMessage(
+          {
+            type: 'translate',
+            text: word,
+            sourceLang: 'auto',
+            targetLang,
+            provider: this._settings.translationProvider,
+            apiKey: this._apiKeys.translationApiKey || null,
+          },
+          (response) => {
+            if (chrome.runtime.lastError) {
+              resolve(word);
+              return;
+            }
+            if (response?.success) {
+              resolve(response.translation);
+            } else {
+              resolve(word);
+            }
+          }
+        );
+      } else {
+        resolve(word);
       }
     });
   }

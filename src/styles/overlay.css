@@ -95,3 +95,72 @@
 :-webkit-full-screen .ytp-autohide .dvsn-overlay {
   bottom: 30px;
 }
+
+/* === Word hover tooltip === */
+
+/* Each word is wrapped in a span — enable pointer-events so hover works
+   while the parent overlay container stays pointer-events:none */
+.dvsn-word {
+  pointer-events: auto;
+  cursor: default;
+  border-radius: 2px;
+  transition: background 0.15s ease;
+}
+
+.dvsn-word:hover {
+  background: rgba(255, 255, 255, 0.15);
+  cursor: pointer;
+}
+
+/* Tooltip shown above hovered word */
+.dvsn-tooltip {
+  position: fixed;
+  z-index: 2147483647;
+  pointer-events: none;
+  background: rgba(20, 20, 30, 0.95);
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.4;
+  max-width: 280px;
+  text-align: center;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.dvsn-tooltip.dvsn-tooltip-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Tooltip arrow pointing down */
+.dvsn-tooltip::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: rgba(20, 20, 30, 0.95);
+}
+
+/* When tooltip is below the word, arrow points up */
+.dvsn-tooltip.dvsn-tooltip-below::after {
+  top: auto;
+  bottom: 100%;
+  border-top-color: transparent;
+  border-bottom-color: rgba(20, 20, 30, 0.95);
+}
+
+/* Highlighted word in tooltip (the original word) */
+.dvsn-tooltip-word {
+  color: #ffd700;
+  font-weight: 600;
+}
+
