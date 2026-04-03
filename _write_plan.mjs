@@ -1,0 +1,1 @@
+import{writeFileSync as w}from"fs";w("C:/Users/duy/.claude/plans/hashed-crafting-bubble-agent-adde078e5a6559418.md",content);console.log("ok");

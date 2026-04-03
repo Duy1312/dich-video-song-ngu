@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup">
+    <div class="header">
+      <h1>Dịch Video Song Ngữ</h1>
+      <label class="toggle">
+        <input type="checkbox" id="enabled" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="section">
+      <label class="label">Ngôn ngữ dịch</label>
+      <select id="targetLang"></select>
+    </div>
+
+    <div class="section">
+      <label class="label">Chế độ hiển thị</label>
+      <select id="displayMode">
+        <option value="overlay">Overlay trên video</option>
+        <option value="panel">Side Panel</option>
+        <option value="both">Cả hai</option>
+      </select>
+    </div>
+
+    <div class="section">
+      <label class="label">Dịch vụ dịch</label>
+      <select id="translationProvider">
+        <option value="google-free">Google Translate (Free)</option>
+        <option value="deepl">DeepL (API Key)</option>
+        <option value="openai">OpenAI GPT (API Key)</option>
+        <option value="google-cloud">Google Cloud (API Key)</option>
+      </select>
+    </div>
+
+    <div class="section api-key-section" id="translationKeySection" style="display:none">
+      <label class="label">Translation API Key</label>
+      <input type="password" id="translationApiKey" placeholder="Nhập API key...">
+    </div>
+
+    <div class="section">
+      <label class="label">Nhận diện giọng nói (fallback)</label>
+      <select id="sttProvider">
+        <option value="web-speech">Web Speech API (Free)</option>
+        <option value="whisper">OpenAI Whisper (API Key)</option>
+      </select>
+    </div>
+
+    <div class="section api-key-section" id="whisperKeySection" style="display:none">
+      <label class="label">Whisper API Key</label>
+      <input type="password" id="whisperApiKey" placeholder="Nhập API key...">
+    </div>
+
+    <div class="section">
+      <label class="label">Cỡ chữ phụ đề</label>
+      <input type="range" id="fontSize" min="12" max="32" value="18" step="2">
+      <span id="fontSizeValue">18px</span>
+    </div>
+
+    <div class="section">
+      <label class="toggle-inline">
+        <input type="checkbox" id="subtitleBackground">
+        <span>Nền phụ đề</span>
+      </label>
+    </div>
+
+    <div class="footer">
+      <button id="saveBtn">Lưu cài đặt</button>
+      <span id="status"></span>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,166 @@
+/* === Hide native captions visually but keep them rendering in DOM === */
+/* IMPORTANT: Do NOT use opacity:0 or visibility:hidden — YouTube's JS
+   renderer checks visibility and stops writing caption text into the DOM
+   when elements appear invisible (IntersectionObserver returns ratio 0).
+   Instead, make text transparent so YouTube keeps rendering captions
+   and our MutationObserver can read the text content. */
+.ytp-caption-window-container .ytp-caption-window-bottom {
+  color: transparent !important;
+  background: transparent !important;
+  text-shadow: none !important;
+  -webkit-text-fill-color: transparent !important;
+  pointer-events: none !important;
+}
+
+/* === Bilingual subtitle overlay === */
+.dvsn-overlay {
+  position: absolute;
+  bottom: 60px;
+  left: 0;
+  right: 0;
+  z-index: 2147483646;
+  text-align: center;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 0 5%;
+}
+
+/* When YouTube controls are visible, move up */
+.ytp-autohide .dvsn-overlay {
+  bottom: 20px;
+}
+
+/* Original text (foreign language) — smaller, semi-transparent */
+.dvsn-original {
+  color: #ccc;
+  padding: 2px 10px;
+  font-size: 0.85em;
+  line-height: 1.3;
+  text-shadow:
+    0 0 4px rgba(0, 0, 0, 0.9),
+    0 1px 3px rgba(0, 0, 0, 0.9),
+    1px 1px 2px rgba(0, 0, 0, 0.7);
+  max-width: 90%;
+  word-wrap: break-word;
+}
+
+/* Translated text (Vietnamese) — larger, prominent */
+.dvsn-translated {
+  color: #fff;
+  padding: 3px 12px;
+  font-size: 1em;
+  font-weight: 500;
+  line-height: 1.35;
+  text-shadow:
+    0 0 5px rgba(0, 0, 0, 0.95),
+    0 1px 4px rgba(0, 0, 0, 0.95),
+    1px 1px 3px rgba(0, 0, 0, 0.8),
+    -1px -1px 3px rgba(0, 0, 0, 0.8);
+  max-width: 90%;
+  word-wrap: break-word;
+}
+
+/* Optional: background style (user can toggle) */
+.dvsn-overlay.dvsn-bg-on .dvsn-original {
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 3px;
+}
+
+.dvsn-overlay.dvsn-bg-on .dvsn-translated {
+  background: rgba(0, 0, 0, 0.7);
+  border-radius: 3px;
+}
+
+/* Font size presets via data attribute */
+.dvsn-overlay[data-size="small"] { font-size: 14px; }
+.dvsn-overlay[data-size="medium"] { font-size: 18px; }
+.dvsn-overlay[data-size="large"] { font-size: 22px; }
+.dvsn-overlay[data-size="xlarge"] { font-size: 26px; }
+
+/* Custom font size via CSS variable */
+.dvsn-overlay {
+  font-size: var(--dvsn-font-size, 18px);
+}
+
+/* Fullscreen adjustments */
+:fullscreen .dvsn-overlay,
+:-webkit-full-screen .dvsn-overlay {
+  bottom: 80px;
+}
+
+:fullscreen .ytp-autohide .dvsn-overlay,
+:-webkit-full-screen .ytp-autohide .dvsn-overlay {
+  bottom: 30px;
+}
+
+/* === Word hover tooltip === */
+
+/* Each word is wrapped in a span — enable pointer-events so hover works
+   while the parent overlay container stays pointer-events:none */
+.dvsn-word {
+  pointer-events: auto;
+  cursor: default;
+  border-radius: 2px;
+  transition: background 0.15s ease;
+}
+
+.dvsn-word:hover {
+  background: rgba(255, 255, 255, 0.15);
+  cursor: pointer;
+}
+
+/* Tooltip shown above hovered word */
+.dvsn-tooltip {
+  position: fixed;
+  z-index: 2147483647;
+  pointer-events: none;
+  background: rgba(20, 20, 30, 0.95);
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.4;
+  max-width: 280px;
+  text-align: center;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.dvsn-tooltip.dvsn-tooltip-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Tooltip arrow pointing down */
+.dvsn-tooltip::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: rgba(20, 20, 30, 0.95);
+}
+
+/* When tooltip is below the word, arrow points up */
+.dvsn-tooltip.dvsn-tooltip-below::after {
+  top: auto;
+  bottom: 100%;
+  border-top-color: transparent;
+  border-bottom-color: rgba(20, 20, 30, 0.95);
+}
+
+/* Highlighted word in tooltip (the original word) */
+.dvsn-tooltip-word {
+  color: #ffd700;
+  font-weight: 600;
+}
+
